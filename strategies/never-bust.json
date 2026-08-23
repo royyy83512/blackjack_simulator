@@ -1,6 +1,6 @@
 {
   "name": "never-bust",
-  "description": "絕不爆牌：硬 12 以上就停，軟牌補到 18",
+  "description": "Never busts: stands on any hard 12+, hits soft hands up to 18",
   "tables": {
     "hard": {
       "4": "H  H  H  H  H  H  H  H  H   H",

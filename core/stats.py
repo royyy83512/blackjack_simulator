@@ -1,10 +1,13 @@
-"""統計彙總。
+"""Statistics aggregation.
 
-模擬迴圈本身不呼叫任何方法（見 runner.py），只用區域變數累加，
-跑完一段才組成 SessionResult。這樣 1e8 手也不會被方法呼叫拖垮。
+The simulation loop itself calls no methods at all (see runner.py) —
+everything accumulates into local variables, and a SessionResult is only
+built once a chunk finishes. That way even 1e8 hands aren't dragged down
+by method-call overhead.
 
-變異數用 sum / sumsq 的樸素公式即可：每手損益是 O(1) 量級，
-sumsq 遠大於 sum²/n，不存在災難性抵銷的問題。
+Variance uses the naive sum / sumsq formula: per-round results are O(1)
+in magnitude, sumsq is always much larger than sum²/n, so there's no
+catastrophic cancellation to worry about.
 """
 import math
 from dataclasses import dataclass, field
@@ -14,9 +17,9 @@ from dataclasses import dataclass, field
 class SessionResult:
     label: str = ''
     rounds: int = 0
-    hands: int = 0            # 含分牌後的手數
+    hands: int = 0            # includes extra hands from splits
     net: float = 0.0
-    sumsq: float = 0.0        # 每回合淨損益的平方和
+    sumsq: float = 0.0        # sum of squared per-round net results
     initial_wagered: float = 0.0
     total_wagered: float = 0.0
     wins: int = 0
@@ -32,17 +35,18 @@ class SessionResult:
     insurances: int = 0
     dealer_played: int = 0
     dealer_totals: list = field(default_factory=lambda: [0] * 6)  # 17,18,19,20,21,bust
-    max_drawdown: float = 0.0   # 本段內部的最大回撤
-    peak: float = 0.0           # 本段內累積淨值的最高點
-    low: float = 0.0            # 本段內累積淨值的最低點
-    curve: list = field(default_factory=list)   # 降採樣後的資金曲線
+    max_drawdown: float = 0.0   # this chunk's own max drawdown
+    peak: float = 0.0           # this chunk's highest cumulative net value
+    low: float = 0.0            # this chunk's lowest cumulative net value
+    curve: list = field(default_factory=list)   # downsampled bankroll curve
     curve_stride: int = 1
     shuffles: int = 0
     seconds: float = 0.0
 
 
 def combine(results, label=None):
-    """把多段（多核／多 session）結果合併成一個。曲線不合併。"""
+    """Merge multiple chunks (multi-core / multi-session) into one. Curves
+    are not merged."""
     out = SessionResult(label=label or (results[0].label if results else ''))
     for r in results:
         out.rounds += r.rounds
@@ -72,10 +76,13 @@ def combine(results, label=None):
 
 
 def stitch(chunks, label=None):
-    """把「同一條連續路徑」被切成多段平行跑的結果接回去。
+    """Reassemble the results of "one continuous path" that was split into
+    several chunks run in parallel.
 
-    各段之間相互獨立同分布，接起來仍是合法的隨機漫步路徑；
-    這裡順便把跨段的最大回撤算精確（只看段內會低估）。
+    Each chunk is independent and identically distributed, so stitched
+    together they're still a valid random-walk path; this also computes
+    the max drawdown across chunk boundaries exactly (looking within each
+    chunk alone would underestimate it).
     """
     out = combine(chunks, label)
     offset = 0.0
@@ -95,9 +102,10 @@ def stitch(chunks, label=None):
 
 
 def risk_of_ruin(ev_per_round, var_per_round, bankroll_units):
-    """無限手數下的破產機率（標準連續近似）。
+    """Probability of ruin over an unbounded number of rounds (the
+    standard continuous approximation).
 
-    RoR = exp(-2 * B * EV / Var)；EV <= 0 時終將破產，回傳 1。
+    RoR = exp(-2 * B * EV / Var); if EV <= 0, ruin is certain, returns 1.
     """
     if bankroll_units is None or bankroll_units <= 0:
         return None
@@ -116,7 +124,8 @@ def summarize(r: SessionResult, bankroll_units=None, base_bet=1.0):
     se = sd / math.sqrt(n)
 
     avg_initial = r.initial_wagered / n
-    # house edge 以「原始注碼」為分母，這是業界引用 0.5% 那個數字的定義
+    # house edge uses the original wager as its denominator — this is the
+    # definition behind the commonly-cited 0.5% figure
     edge = -r.net / r.initial_wagered if r.initial_wagered else 0.0
     edge_ci = 1.96 * se / avg_initial if avg_initial else 0.0
     action_edge = -r.net / r.total_wagered if r.total_wagered else 0.0
@@ -131,7 +140,7 @@ def summarize(r: SessionResult, bankroll_units=None, base_bet=1.0):
         'ev_ci95': 1.96 * se,
         'sd_per_round': sd,
         'variance': var,
-        'house_edge': edge,                 # 正值 = 賭場優勢
+        'house_edge': edge,                 # positive = house advantage
         'house_edge_ci95': edge_ci,
         'edge_on_action': action_edge,
         'n0': (sd / abs(mean)) ** 2 if mean else float('inf'),
@@ -159,30 +168,31 @@ def summarize(r: SessionResult, bankroll_units=None, base_bet=1.0):
 
 
 def hands_needed(target_precision, sd_per_round=1.14):
-    """要把 95% 信賴區間壓到 ±target_precision（比例，如 0.0002）需要幾手。"""
+    """How many hands are needed to bring the 95% confidence interval down
+    to +/-target_precision (a fraction, e.g. 0.0002)."""
     return (1.96 * sd_per_round / target_precision) ** 2
 
 
 def format_summary(s, verbose=True):
     L = []
     a = L.append
-    a(f"  淨損益           {s['net']:+,.1f} 單位   ({s['rounds']:,} 回合 / {s['hands']:,} 手)")
-    a(f"  每回合 EV        {s['ev_per_round']:+.5f} ± {s['ev_ci95']:.5f} 單位")
-    a(f"  賭場優勢         {s['house_edge']*100:+.4f}% ± {s['house_edge_ci95']*100:.4f}%  (95% CI)")
-    a(f"  每回合標準差     {s['sd_per_round']:.4f}")
+    a(f"  {'Net result':<22} {s['net']:+,.1f} units   ({s['rounds']:,} rounds / {s['hands']:,} hands)")
+    a(f"  {'EV per round':<22} {s['ev_per_round']:+.5f} +/- {s['ev_ci95']:.5f} units")
+    a(f"  {'House edge':<22} {s['house_edge']*100:+.4f}% +/- {s['house_edge_ci95']*100:.4f}%  (95% CI)")
+    a(f"  {'SD per round':<22} {s['sd_per_round']:.4f}")
     if s['action_ratio']:
-        a(f"  action / 原始注  {s['action_ratio']:.4f}   (含加倍與分牌的追加注)")
+        a(f"  {'Action / initial bet':<22} {s['action_ratio']:.4f}   (includes extra wagers from doubles and splits)")
     if s['n0'] != float('inf'):
-        a(f"  N0（打平 1 SD）  {s['n0']:,.0f} 回合")
+        a(f"  {'N0 (rounds per 1 SD)':<22} {s['n0']:,.0f} rounds")
     if s['risk_of_ruin'] is not None:
-        a(f"  破產機率         {s['risk_of_ruin']*100:.3f}%  (本金 {s['bankroll_units']:g} 單位)")
-    a(f"  最大回撤         {s['max_drawdown']:,.1f} 單位")
+        a(f"  {'Risk of ruin':<22} {s['risk_of_ruin']*100:.3f}%  (bankroll {s['bankroll_units']:g} units)")
+    a(f"  {'Max drawdown':<22} {s['max_drawdown']:,.1f} units")
     if verbose:
-        a(f"  勝 / 負 / 和      {s['win_rate']*100:.2f}% / {s['loss_rate']*100:.2f}% / {s['push_rate']*100:.2f}%")
-        a(f"  玩家 BJ          {s['player_bj_rate']*100:.3f}%      莊家 BJ  {s['dealer_bj_rate']*100:.3f}%")
-        a(f"  玩家爆牌         {s['player_bust_rate']*100:.2f}%      莊家爆牌 {s['dealer_bust_rate']*100:.2f}%")
-        a(f"  加倍 / 分牌 / 投降  {s['double_rate']*100:.2f}% / {s['split_rate']*100:.2f}% / {s['surrender_rate']*100:.2f}%")
+        a(f"  {'Win / loss / push':<22} {s['win_rate']*100:.2f}% / {s['loss_rate']*100:.2f}% / {s['push_rate']*100:.2f}%")
+        a(f"  {'Player BJ / dealer BJ':<22} {s['player_bj_rate']*100:.3f}%  /  {s['dealer_bj_rate']*100:.3f}%")
+        a(f"  {'Player/dealer bust':<22} {s['player_bust_rate']*100:.2f}%  /  {s['dealer_bust_rate']*100:.2f}%")
+        a(f"  {'Double/split/surrender':<22} {s['double_rate']*100:.2f}% / {s['split_rate']*100:.2f}% / {s['surrender_rate']*100:.2f}%")
         d = s['dealer_dist']
-        a("  莊家終局 17-21/爆  " + " / ".join(f"{x*100:.1f}%" for x in d))
-    a(f"  速度             {s['hands_per_sec']:,.0f} 回合/秒  ({s['seconds']:.1f}s)")
+        a("  " + f"{'Dealer final 17-21/bust':<22} " + " / ".join(f"{x*100:.1f}%" for x in d))
+    a(f"  {'Speed':<22} {s['hands_per_sec']:,.0f} rounds/sec  ({s['seconds']:.1f}s)")
     return "\n".join(L)

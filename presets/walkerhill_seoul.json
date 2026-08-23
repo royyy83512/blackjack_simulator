@@ -1,6 +1,6 @@
 {
-  "name": "首爾華克山莊 (Walkerhill Seoul)",
-  "description": "peek / S17 / 任兩張可加倍 / DAS / late surrender（莊家A可投降）/ 莊家BJ通殺 / 6副牌 penetration 75% / BJ 3:2 / A 最多分4手各補一張",
+  "name": "Walkerhill Seoul",
+  "description": "peek / S17 / double on any two cards / DAS / late surrender (dealer allows surrender vs. ace) / dealer BJ crushes all bets / 6 decks, 75% penetration / BJ 3:2 / aces resplit up to 4 hands, one card each",
   "rules": {
     "num_decks": 6,
     "penetration": 0.75,

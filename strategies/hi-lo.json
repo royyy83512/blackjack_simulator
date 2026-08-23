@@ -1,17 +1,17 @@
 {
   "name": "hi-lo",
-  "description": "基本策略 + Hi-Lo 算牌（只調注碼，不做偏離）",
+  "description": "Basic strategy + Hi-Lo card counting (bet spread only, no play deviations)",
   "extends": "basic",
   "counting": {
     "system": "Hi-Lo",
     "balanced": true,
-    "_note": "balanced=true 表示用真數（流水數 ÷ 剩餘副數）；不平衡系統請設 false",
+    "_note": "balanced=true means the true count is used (running count / decks remaining); set false for an unbalanced system",
     "tags": {"2": 1, "3": 1, "4": 1, "5": 1, "6": 1,
              "7": 0, "8": 0, "9": 0,
              "10": -1, "A": -1}
   },
   "betting": {
-    "_note": "[真數門檻, 注碼倍數]。取「門檻 <= 目前計數」之中最大的那筆。",
+    "_note": "[true count threshold, bet multiplier]. Uses the highest threshold <= the current count.",
     "ramp": [[1, 1], [2, 2], [3, 4], [4, 8], [5, 12]]
   },
   "insurance": {"min_count": 3}

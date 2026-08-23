@@ -1,14 +1,21 @@
-"""模擬執行器：緊迴圈 + 多核平行 + 共用亂數。
+"""The simulation runner: tight loop + multi-core parallelism + shared
+random numbers.
 
-平行化的單位是「chunk」。同一條路徑被切成多個 chunk 分給不同核心，
-各 chunk 之間獨立同分布，接回去仍是合法的隨機漫步（stats.stitch 會
-把跨 chunk 的最大回撤補算正確）。
+The unit of parallelism is a "chunk." One run is sliced into several
+chunks handed to different cores; the chunks are independent and
+identically distributed, so stitching them back together is still a
+valid random walk (stats.stitch correctly recomputes max drawdown across
+chunk boundaries).
 
-共用亂數（Common Random Numbers）
-    比較不同規則／策略時，用同一組 seed 產生同一副洗好的牌靴。
-    多數手牌兩邊決策相同、拿到的牌也相同，差值為 0，
-    因此「A 減 B」的變異數遠小於各自的變異數，同樣手數能分辨更小的差異。
-    但書：一旦某手決策不同，之後的牌序就會錯開，配對不是完美的。
+Common Random Numbers (CRN)
+    When comparing different rules or strategies, the same seed produces
+    the same shuffled shoe. Most hands make the same decisions and draw
+    the same cards on both sides, so the difference is 0 — meaning the
+    variance of "A minus B" is far smaller than either side's own
+    variance, letting the same number of hands resolve much smaller
+    differences. Caveat: once one hand's decision diverges, the card
+    sequences after it drift apart, so the pairing isn't perfect from
+    that point on.
 """
 import os
 import time
@@ -22,10 +29,12 @@ from .stats import SessionResult, stitch, combine
 
 
 def run_chunk(args):
-    """跑一段回合。這是整個程式唯一的熱路徑，刻意全部用區域變數。"""
+    """Run one block of rounds. This is the whole program's only hot path,
+    deliberately written with local variables throughout."""
     (rules, strat_name, rounds, base_bet, seed, curve_points, label) = args
 
-    # 先建策略：牌靴的計數標籤由策略檔決定（Hi-Lo 與 KO 的標籤不同）
+    # build the strategy first: the shoe's count tags are decided by the
+    # strategy file (Hi-Lo and KO use different tags)
     strat = strategy_mod.make(strat_name, rules)
     shoe = Shoe(rules.num_decks, rules.penetration, seed,
                 tags=strat.count_tags or HI_LO,
@@ -124,15 +133,18 @@ def run_chunk(args):
     )
 
 
-# 單一 chunk 的回合上限。取消只在 chunk 邊界生效，所以 chunk 不能太大，
-# 否則按下取消要等很久；一個 chunk 大約 0.5 秒是舒服的折衷。
+# Max rounds per chunk. Cancellation only takes effect at chunk
+# boundaries, so a chunk can't be too large or cancelling would take a
+# long time to respond; roughly 0.5 seconds per chunk is a comfortable
+# tradeoff.
 MAX_CHUNK = 250_000
 
 
 def plan_chunks(total_rounds, n_chunks, min_chunk=20_000, max_chunk=MAX_CHUNK):
-    """把回合數平均切段。至少 n_chunks 段，且每段不超過 max_chunk。"""
+    """Split the round count evenly. At least n_chunks pieces, and no
+    piece exceeds max_chunk."""
     n = max(1, min(n_chunks, max(1, total_rounds // min_chunk)))
-    n = max(n, -(-total_rounds // max_chunk))          # 無條件進位
+    n = max(n, -(-total_rounds // max_chunk))          # ceiling division
     base, extra = divmod(total_rounds, n)
     return [base + (1 if i < extra else 0) for i in range(n)]
 
@@ -144,20 +156,24 @@ def _seed_for(base_seed, session, chunk):
 def run(rules, strat_name, total_rounds, sessions=1, base_bet=1.0,
         seed=20240514, jobs=None, curve_points=2000, label=None,
         progress=None, executor=None):
-    """跑一組（規則, 策略）。
+    """Run one (rules, strategy) combination.
 
-    total_rounds : 總回合數（所有 session 加起來）
-    sessions     : 獨立實驗次數 —— 決定畫出幾條資金曲線、結果分布有幾個樣本
-    seed         : 同 seed + 同切法 => 不同策略拿到同一副牌（共用亂數）
+    total_rounds : total round count (summed across all sessions)
+    sessions     : number of independent trials — determines how many
+                   bankroll curves get drawn and how many samples the
+                   result distribution has
+    seed         : same seed + same split => different strategies draw the
+                   same shoe (Common Random Numbers)
 
-    回傳 (合併結果, [每個 session 的結果])
+    Returns (merged result, [per-session results]).
     """
     jobs = jobs or os.cpu_count() or 1
     label = label or f"{strat_name} | {rules.label()}"
     sessions = max(1, sessions)
     per_session = max(1, total_rounds // sessions)
 
-    # 總 chunk 數抓 jobs 的數倍，兼顧負載平衡與進度回報密度
+    # total chunk count is a multiple of jobs, balancing load against
+    # progress-reporting granularity
     sizes = plan_chunks(per_session, max(1, round(jobs * 6 / sessions)))
     per_chunk_curve = max(1, curve_points // len(sizes)) if curve_points else 0
 
@@ -202,10 +218,11 @@ def run(rules, strat_name, total_rounds, sessions=1, base_bet=1.0,
 
 def compare(configs, total_rounds, sessions=1, base_bet=1.0, seed=20240514,
             jobs=None, curve_points=2000, progress=None):
-    """用同一組 seed 跑多個設定 —— 共用亂數，讓彼此的差異更容易分辨。
+    """Run multiple configurations with the same seed — Common Random
+    Numbers makes the differences between them easier to resolve.
 
     configs: [(label, Rules, strategy_name), ...]
-    回傳    : [(label, 合併結果, [session 結果]), ...]
+    Returns: [(label, merged result, [session results]), ...]
     """
     jobs = jobs or os.cpu_count() or 1
     out = []

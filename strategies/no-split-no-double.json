@@ -1,6 +1,6 @@
 {
   "name": "no-split-no-double",
-  "description": "基本策略但永不分牌、永不加倍（用來量出這兩個動作值多少）",
+  "description": "Basic strategy but never splits or doubles (used to measure how much those two actions are worth)",
   "extends": "basic",
   "tables": {
     "hard": {

@@ -1,27 +1,36 @@
-"""一手 blackjack 的完整流程。
+"""The full playthrough of a single blackjack hand.
 
-設計重點
---------
-* 動作用 int bitmask（ACT_*）表示，避免在決策熱路徑上配置 set。
-* Hand 快取點數，補牌是 O(1) 更新，不用每次 sum()。
-* peek / no-peek 的發牌張數不同：peek 一開始就發底牌（4 張），
-  no-peek 只發 3 張，底牌等玩家動作結束才補。這會影響牌靴消耗，
-  所以必須照實模擬。
-* 分牌後的第二張牌等輪到那一手才發，跟真實牌桌一致。
+Design notes
+------------
+* Actions are int bitmasks (ACT_*), avoiding set allocation on the hot
+  decision path.
+* Hand caches its total, so hitting is an O(1) update instead of summing
+  every time.
+* peek and no-peek deal a different number of cards up front: peek deals
+  the hole card immediately (4 cards total), no-peek only deals 3, and
+  the hole card is drawn after the player finishes acting. This changes
+  shoe consumption, so it has to be simulated faithfully.
+* The second card of a split hand isn't dealt until that hand comes up,
+  matching a real table.
 
-投降的語意（重要，兩者差別就是 early surrender 值錢的原因）
-* peek + late  ：莊家確認沒 BJ 後才投降，穩定輸一半。
-* no-peek+late ：玩家先投降，之後莊家翻出 BJ 的話 —— 輸全額。
-* no-peek+early：莊家翻牌前投降，不管莊家有沒有 BJ 都只輸一半。
+Surrender semantics (important — this difference is exactly why early
+surrender is worth more)
+* peek + late:     surrender only after the dealer confirms no BJ, a
+                    guaranteed half-loss.
+* no-peek + late:  the player surrenders first; if the dealer then flips
+                    a BJ, the full bet is lost.
+* no-peek + early: the player surrenders before the dealer's hole card is
+                    even revealed, so it's always a flat half-loss
+                    regardless of whether the dealer has BJ.
 """
 from .rules import SURRENDER_EARLY, LOSS_ORIGINAL
 
-# 玩家動作
+# player actions
 ACT_HIT, ACT_STAND, ACT_DOUBLE, ACT_SPLIT, ACT_SURRENDER = 1, 2, 4, 8, 16
 ACT_NAME = {ACT_HIT: 'H', ACT_STAND: 'S', ACT_DOUBLE: 'D',
             ACT_SPLIT: 'P', ACT_SURRENDER: 'R'}
 
-# 一手的事件旗標
+# per-hand event flags
 F_PLAYER_BJ, F_DEALER_BJ, F_DOUBLED, F_SPLIT = 1, 2, 4, 8
 F_SURRENDER, F_PLAYER_BUST, F_DEALER_BUST, F_INSURANCE = 16, 32, 64, 128
 
@@ -70,11 +79,11 @@ class Hand:
 
 
 def legal_actions(h, up, n_hands, rules):
-    """回傳這一手當下合法動作的 bitmask。"""
+    """Return the bitmask of actions legal for this hand right now."""
     cards = h.cards
     ncards = len(cards)
 
-    # 分到的 A：一張定生死（除非規則允許補牌）
+    # a split ace: one card decides everything (unless the rules allow hitting it)
     if h.split_ace and not rules.hit_split_aces:
         legal = ACT_STAND
         if (rules.resplit_aces and ncards == 2 and cards[0] == 1 and cards[1] == 1
@@ -97,7 +106,8 @@ def legal_actions(h, up, n_hands, rules):
 
 
 def dealer_play(cards, shoe, hits_soft_17):
-    """莊家補到 17（或軟 17 也補），回傳最終點數，爆牌則 > 21。"""
+    """Draw for the dealer up to 17 (or past a soft 17 too, if applicable).
+    Returns the final total; > 21 means the dealer busted."""
     s = sum(cards)
     aces = cards.count(1)
     while True:
@@ -118,17 +128,18 @@ def _is_bj(a, b):
 
 
 def play_round(shoe, strategy, rules, base_bet=1.0):
-    """打完一手（含分牌）。
+    """Play out one hand (including any splits).
 
-    回傳 (net, initial_wager, total_wager, n_hands, dealer_total, flags)
-    net 是這一手的淨損益（單位：注碼），dealer_total 為 0 表示莊家沒動作。
+    Returns (net, initial_wager, total_wager, n_hands, dealer_total, flags).
+    net is this hand's net result in bet units; dealer_total of 0 means
+    the dealer never had to act.
     """
     shoe.start_round()
     bet = strategy.bet(shoe, rules, base_bet)
     net = 0.0
     flags = 0
 
-    # 發牌：玩家、莊家明牌、玩家、（peek 才發底牌）
+    # deal: player, dealer upcard, player, (hole card only if peek)
     p1 = shoe.draw()
     up = shoe.draw()
     p2 = shoe.draw()
@@ -141,7 +152,7 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
         ins_bet = bet * 0.5
         flags |= F_INSURANCE
 
-    # ---- peek 模式：莊家先看底牌 ----
+    # ---- peek mode: the dealer checks the hole card first ----
     if rules.dealer_peek:
         hole = shoe.draw()
         dealer_cards.append(hole)
@@ -151,7 +162,7 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
             if ins_bet:
                 net += 2 * ins_bet
             if player_bj:
-                flags |= F_PLAYER_BJ            # 和局
+                flags |= F_PLAYER_BJ            # push
             else:
                 net -= bet
             return (net, bet, bet + ins_bet, 1, 21, flags)
@@ -162,7 +173,7 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
             net += bet * rules.blackjack_pays
             return (net, bet, bet + ins_bet, 1, 0, flags)
     else:
-        # ---- no-peek：early surrender 在莊家補牌前決定 ----
+        # ---- no-peek: early surrender is decided before the dealer draws ----
         if (rules.surrender == SURRENDER_EARLY and not player_bj
                 and rules.surrender_allowed_vs(up)
                 and strategy.early_surrender(player, up, shoe, rules)):
@@ -178,12 +189,12 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
                 net -= ins_bet
             return (net, bet, bet + ins_bet, 1, 0, flags)
 
-    # ---- 玩家行動 ----
+    # ---- player acts ----
     hands = [player]
     i = 0
     while i < len(hands):
         h = hands[i]
-        if len(h.cards) == 1:            # 分牌後補的第二張
+        if len(h.cards) == 1:            # the second card dealt after a split
             h.add(shoe.draw())
         while True:
             if h.total >= 21:
@@ -215,14 +226,17 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
                 h.split_ace = is_ace
                 h.add(shoe.draw())
                 hands.insert(i + 1, Hand([card], bet, from_split=True, split_ace=is_ace))
-                # 不能在這裡 break：分到 A 之後若再拿到 A，開了 RSA 是可以再分的。
-                # legal_actions() 已經處理「分到的 A 只能停牌」，交給它判斷即可，
-                # 否則第一手不會有 RSA 機會、第二手卻會，行為不對稱。
+                # can't break here: if this hand was a split ace and draws
+                # another ace, RSA (if enabled) allows splitting again.
+                # legal_actions() already handles "a split ace can only
+                # stand", so just let it decide — otherwise the first hand
+                # would never get an RSA chance while the second one would,
+                # which is asymmetric and wrong.
                 continue
             h.add(shoe.draw())           # ACT_HIT
         i += 1
 
-    # ---- no-peek：現在才翻底牌 ----
+    # ---- no-peek: the hole card is revealed only now ----
     dealer_bj = False
     if not rules.dealer_peek:
         hole = shoe.draw()
@@ -234,16 +248,16 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
             flags |= F_DEALER_BJ
             if player_bj:
                 flags |= F_PLAYER_BJ
-                return (net, bet, bet + ins_bet, 1, 21, flags)   # 和局
+                return (net, bet, bet + ins_bet, 1, 21, flags)   # push
             if rules.dealer_bj_loss == LOSS_ORIGINAL:
-                net -= bet                                       # OBO：只輸原始注
+                net -= bet                                       # OBO: only the original bet is at risk
                 return (net, bet, bet + ins_bet, len(hands), 21, flags)
         elif player_bj:
             flags |= F_PLAYER_BJ
             net += bet * rules.blackjack_pays
             return (net, bet, bet + ins_bet, 1, 0, flags)
 
-    # ---- 莊家行動 ----
+    # ---- dealer acts ----
     dealer_total = 21 if dealer_bj else 0
     if not dealer_bj:
         for h in hands:
@@ -254,12 +268,12 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
     if dealer_total > 21:
         flags |= F_DEALER_BUST
 
-    # ---- 結算 ----
+    # ---- settle ----
     total_wager = ins_bet
     for h in hands:
         total_wager += h.bet
         if h.surrendered:
-            # no-peek 的 late surrender 碰到莊家 BJ 要輸全額
+            # under no-peek, late surrender loses the full bet if the dealer has BJ
             net -= h.bet if dealer_bj else h.bet * 0.5
             continue
         if h.busted:
@@ -267,8 +281,9 @@ def play_round(shoe, strategy, rules, base_bet=1.0):
             net -= h.bet
             continue
         if dealer_bj:
-            # 莊家 natural 通殺：連玩家三張湊成的 21 也照輸不誤
-            # （玩家自己的 natural 在前面已經先判成和局了）
+            # dealer natural crushes everything, even a 3-card 21 the
+            # player drew into (the player's own natural was already
+            # settled as a push above)
             net -= h.bet
             continue
         ht = h.total

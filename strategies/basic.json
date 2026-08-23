@@ -1,8 +1,8 @@
 {
   "name": "basic",
-  "description": "基本策略（4-8 副牌 / S17 / DAS / late surrender 為基準）",
-  "_columns": "每列 10 格，依序對應莊家明牌  2  3  4  5  6  7  8  9  10  A",
-  "_tokens": "H=補 S=停 D=加倍否則補 Ds=加倍否則停 Y/P=分 Ph=有DAS才分 N=不分 Rh/Rs/Rp=投降否則補/停/分",
+  "description": "Basic strategy (baseline: 4-8 decks / S17 / DAS / late surrender)",
+  "_columns": "Each row is 10 cells, in order for dealer upcard 2 3 4 5 6 7 8 9 10 A",
+  "_tokens": "H=hit S=stand D=double else hit Ds=double else stand Y/P=split Ph=split only with DAS N=don't split Rh/Rs/Rp=surrender else hit/stand/split",
   "tables": {
     "hard": {
       "4": "H  H  H  H  H  H  H  H  H   H",
@@ -54,55 +54,55 @@
       "when": {
         "dealer_hits_soft_17": true
       },
-      "description": "H17：莊家軟 17 要補牌，這 6 格跟 S17 不同",
+      "description": "H17: the dealer hits soft 17, these 6 cells differ from S17",
       "cells": [
         {
           "table": "hard",
           "row": "11",
           "dealer": "A",
           "action": "D",
-          "_note": "11 對 A 改為加倍"
+          "_note": "11 vs. A becomes double"
         },
         {
           "table": "soft",
           "row": "18",
           "dealer": "2",
           "action": "Ds",
-          "_note": "A,7 對 2 改為加倍"
+          "_note": "A,7 vs. 2 becomes double"
         },
         {
           "table": "soft",
           "row": "19",
           "dealer": "6",
           "action": "Ds",
-          "_note": "A,8 對 6 改為加倍"
+          "_note": "A,8 vs. 6 becomes double"
         },
         {
           "table": "hard",
           "row": "15",
           "dealer": "A",
           "action": "Rh",
-          "_note": "15 對 A 改為投降"
+          "_note": "15 vs. A becomes surrender"
         },
         {
           "table": "hard",
           "row": "17",
           "dealer": "A",
           "action": "Rs",
-          "_note": "17 對 A 改為投降"
+          "_note": "17 vs. A becomes surrender"
         },
         {
           "table": "pair",
           "row": "8",
           "dealer": "A",
           "action": "Rp",
-          "_note": "8,8 對 A 投降優於分牌"
+          "_note": "8,8 vs. A: surrender beats split"
         }
       ]
     }
   ],
   "early_surrender": {
-    "_note": "只在 no-peek + early surrender 生效。對子的情形已被硬點數涵蓋。",
+    "_note": "Only active under no-peek + early surrender. Pairs are already covered by the hard-total rows.",
     "vs_ace": [
       5,
       6,

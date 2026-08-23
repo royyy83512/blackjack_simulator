@@ -1,6 +1,6 @@
 {
-  "name": "澳門永利 (Wynn Macau)",
-  "description": "CSM / S17 / 任兩張可加倍 / no-peek / early surrender（莊家A不可投降）/ OBO / BJ 3:2 / A 只能分一次且各補一張",
+  "name": "Wynn Macau",
+  "description": "CSM / S17 / double on any two cards / no-peek / early surrender (dealer disallows surrender vs. ace) / OBO / BJ 3:2 / aces split only once, one card each",
   "rules": {
     "continuous_shuffle": true,
     "num_decks": 6,

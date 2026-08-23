@@ -1,191 +1,223 @@
-# Blackjack 模擬器
+# Blackjack Simulator
 
-用蒙地卡羅方法（重複隨機試驗）量化 blackjack 的賭場優勢，
-支援可調規則、多策略對比、統計指標與圖表輸出。
+Quantifies blackjack's house edge with Monte Carlo methods (repeated
+random trials), supporting configurable rules, multi-strategy comparison,
+statistical metrics, and chart output.
 
 ```bash
-python3 ui.py                                   # 圖形介面
-python3 cli.py --hands 100000000 --sessions 8   # 命令列跑一億手
-python3 cli.py --list-strategies                 # 列出所有策略
+python3 ui.py                                   # GUI
+python3 cli.py --hands 100000000 --sessions 8   # CLI: run one hundred million hands
+python3 cli.py --list-strategies                 # list all strategies
 python3 test_engine.py && python3 test_strategy.py \
-        && python3 test_solver.py && python3 test_scenario.py   # 單元測試（約 1 分鐘）
-python3 verify.py                               # 統計驗證（約 10 分鐘）
+        && python3 test_solver.py && python3 test_scenario.py   # unit tests (~1 minute)
+python3 verify.py                               # statistical verification (~10 minutes)
 ```
 
 ---
 
-## 檔案結構
+## File Structure
 
-| 檔案 | 內容 |
+| File | Contents |
 |---|---|
-| `core/rules.py` | 規則設定；`normalize()` 修掉互相矛盾的組合並回報原因 |
-| `core/shoe.py` | 牌靴：正確洗牌，切牌點只在每手之間檢查 |
-| `core/engine.py` | 一手牌的完整流程（分牌 / 加倍 / 投降 / peek / 結算） |
-| `core/strategy.py` | 策略載入器（只有讀檔與決策邏輯，沒有策略內容） |
-| `strategies/*.json` | **策略內容都在這裡，改 JSON 就好，不用碰 Python** |
-| `core/stats.py` | EV、標準差、信賴區間、N0、破產機率、最大回撤 |
-| `core/runner.py` | 緊迴圈、多核平行、共用亂數 |
-| `core/exact.py` | 無限牌組精確 DP，當引擎的金標準 |
-| `core/solver.py` | 無限牌組精確窮舉最佳策略（不含分牌），拿來核對任何策略表對不對 |
-| `core/scenario.py` | 單一情境模擬：固定起手兩張＋莊家明牌，比較每個動作的 EV（含分牌） |
-| `core/presets.py` | 賭場規則預設載入器（讀檔邏輯，內容在 presets/*.json） |
-| `presets/*.json` | **一鍵帶入某家賭場的規則，改 JSON 就能新增，不用碰 Python** |
-| `charts.py` | 資金曲線、結果分布、規則比較圖 |
-| `cli.py` / `ui.py` | 命令列 / Tkinter 圖形介面 |
-| `verify.py` | 統計層面的三層正確性驗證 |
-| `test_engine.py` | 引擎的確定性單元測試（指定發牌順序，逐手斷言） |
-| `test_strategy.py` | 策略載入器的測試（格子語法、規則差異、算牌偏離） |
-| `test_solver.py` | 精確解的測試（含無限牌組限制的交叉驗證） |
-| `test_scenario.py` | 情境模擬的測試（拿已知的標準答案對照） |
+| `core/rules.py` | Rule configuration; `normalize()` resolves mutually contradictory combinations and reports why |
+| `core/shoe.py` | The card shoe: correct shuffling, cut card checked only between hands |
+| `core/engine.py` | The full playthrough of one hand (split / double / surrender / peek / settlement) |
+| `core/strategy.py` | Strategy loader (loading and decision logic only, no strategy content) |
+| `strategies/*.json` | **All strategy content lives here -- just edit the JSON, no Python needed** |
+| `core/stats.py` | EV, standard deviation, confidence intervals, N0, risk of ruin, max drawdown |
+| `core/runner.py` | The tight simulation loop, multi-core parallelism, Common Random Numbers |
+| `core/exact.py` | Exact infinite-deck DP, the engine's gold standard |
+| `core/solver.py` | Exact exhaustive optimal strategy at an infinite deck (splits excluded), used to check whether any strategy table is correct |
+| `core/scenario.py` | Single-scenario simulation: fixed opening two cards + dealer upcard, comparing every action's EV (splits included) |
+| `core/presets.py` | Casino rule preset loader (loading logic only, content lives in presets/*.json) |
+| `presets/*.json` | **Apply a casino's rules in one click -- just edit the JSON to add one, no Python needed** |
+| `charts.py` | Bankroll curves, result distribution, rule comparison charts |
+| `cli.py` / `ui.py` | CLI / Tkinter GUI |
+| `verify.py` | Three-layer statistical correctness verification |
+| `test_engine.py` | Deterministic unit tests for the engine (fixed deal order, hand-by-hand assertions) |
+| `test_strategy.py` | Tests for the strategy loader (cell syntax, rule-conditional differences, counting deviations) |
+| `test_solver.py` | Tests for the exact solver (including cross-checks around the infinite-deck limitation) |
+| `test_scenario.py` | Tests for scenario simulation (cross-checked against known standard answers) |
 
-`core/` 不依賴 matplotlib 或 tkinter，可以單獨拿去 PyPy 跑。
-
-舊版程式（`main.py`、`single_game.py`、`bj_lib.py`、`character.py`、
-`basic_strategy.py`、`draw_card.py`、`log.py`）原封不動保留，新系統沒有用到它們。
+`core/` has no dependency on matplotlib or tkinter, and can be run standalone under PyPy.
 
 ---
 
-## 支援的規則
+## Supported Rules
 
-| 規則 | 選項 | 對賭場優勢的影響 |
+| Rule | Options | Effect on house edge |
 |---|---|---|
-| 牌副數 | 2–8 | 2 副比 8 副低約 0.2% |
-| Penetration | 30–95% | 只影響算牌，不影響基本策略 EV |
-| 莊家軟 17 | S17 / H17 | H17 約 +0.22% |
-| 加倍時機 | 任兩張 / 9,10,11 / 10,11 | 限制到 10,11 約 +0.21% |
-| 分牌後可加倍 | DAS 開關 | 關掉約 +0.14% |
-| 投降 | 無 / late / early | late 約 −0.08%，early 更多 |
-| 莊家 A 可否投降 | 開關 | S17 約 0.006%、H17 約 0.022%（見下） |
-| 莊家 peek | 開關 | 關掉（追加注全輸）約 +0.11% |
-| 莊家 BJ 時的損失 | 全輸 / 只輸原注 (OBO) | 僅 no-peek 有意義 |
-| 再分 A (RSA) | 開關 | 約 −0.08% |
-| 分 A 後可補牌 | 開關 | 約 −0.19% |
-| BJ 賠率 | 3:2 / 6:5 | **6:5 約 +1.39%，影響最大的單一規則** |
-| 連續洗牌機 (CSM) | 開關 | 沒有切牌點，每手重洗，算牌完全失效 |
-| 分牌上限 | 固定 4 手 | 不開放調整 |
+| Number of decks | 2-8 | 2 decks is about 0.2% lower than 8 |
+| Penetration | 30-95% | Only affects card counting, not basic-strategy EV |
+| Dealer soft 17 | S17 / H17 | H17 is about +0.22% |
+| When doubling is allowed | any two cards / 9,10,11 / 10,11 | Restricting to 10,11 is about +0.21% |
+| Double after split | DAS on/off | Turning it off is about +0.14% |
+| Surrender | none / late / early | Late is about -0.08%, early is more |
+| Surrender vs. dealer ace | on/off | S17 about 0.006%, H17 about 0.022% (see below) |
+| Dealer peek | on/off | Turning it off (lose all on a dealer BJ) is about +0.11% |
+| Loss on dealer BJ | lose all / original bet only (OBO) | Only meaningful under no-peek |
+| Resplit aces (RSA) | on/off | About -0.08% |
+| Hit after splitting aces | on/off | About -0.19% |
+| BJ payout | 3:2 / 6:5 | **6:5 is about +1.39%, the single biggest-impact rule** |
+| Continuous shuffling machine (CSM) | on/off | No cut card, reshuffles every hand, completely defeats card counting |
+| Split cap | fixed at 4 hands | Not adjustable |
 
-### 莊家 A 可否投降：一個小到需要精確計算才量得出來的規則
+### Surrender vs. dealer ace: a rule small enough that it needs an exact calculation to even measure
 
-有些賭場明牌是 A 時不給投降。這條規則的影響**取決於 S17 還是 H17**：
+Some casinos don't offer surrender when the dealer's upcard is an ace.
+This rule's effect **depends on whether it's S17 or H17**:
 
-| | 允許對 A 投降 | 不允許 | 差 |
+| | Surrender vs. ace allowed | Not allowed | Difference |
 |---|---|---|---|
-| S17（1.2 億手模擬） | +0.3428% | +0.3466% | +0.0038% ±0.0289 |
-| H17（1.2 億手模擬） | +0.5465% | +0.5719% | +0.0254% ±0.0290 |
+| S17 (120M-hand simulation) | +0.3428% | +0.3466% | +0.0038% +/-0.0289 |
+| H17 (120M-hand simulation) | +0.5465% | +0.5719% | +0.0254% +/-0.0290 |
 
-1.2 億手都還分辨不出來（CI 比效應本身還大）。這種時候不要硬跑更多手，
-改用 `core/exact.py` 精確算 —— 只有「玩家會對 A 投降」的那幾手受影響，
-把它們的 `EV(投降) = −0.5` 減去 `EV(照打)` 再乘機率就好：
+Even 120 million hands can't resolve it (the CI is bigger than the effect
+itself). This is when you shouldn't just brute-force more hands -- switch
+to computing it exactly with `core/exact.py` instead. Only the handful of
+hands where "the player would surrender against an ace" are affected;
+just take their `EV(surrender) = -0.5` minus `EV(playing it out)`, weighted
+by probability:
 
-**S17：0.0059%　　H17：0.0221%**（零抽樣誤差，且與上面的模擬點估計吻合）
+**S17: 0.0059%   H17: 0.0221%** (zero sampling error, and it matches the
+simulation's point estimates above)
 
-差別的原因是 S17 對 A 只有「16 對 A」一格投降，而 H17 多了 15、17、8-8 三格：
+The reason for the difference is that S17 only has "hard 16 vs. ace" as a
+surrender cell against an ace, while H17 adds three more: 15, 17, and 8-8:
 
-| H17 受影響的手牌 | 出現機率 | 照打 EV | 投降勝出 |
+| H17 hands affected | Probability | EV playing it out | Surrender wins by |
 |---|---|---|---|
-| 硬 16 對 A | 5.92% | −0.5421 | 0.0421 |
-| 硬 17 對 A | 5.92% | −0.5156 | 0.0156 |
-| 硬 15 對 A | 7.10% | −0.5069 | 0.0069 |
+| Hard 16 vs. ace | 5.92% | -0.5421 | 0.0421 |
+| Hard 17 vs. ace | 5.92% | -0.5156 | 0.0156 |
+| Hard 15 vs. ace | 7.10% | -0.5069 | 0.0069 |
 
-（8,8 那一列是近似值：精確 DP 不處理分牌，把它當硬 16 算。）
+(The 8,8 row is an approximation: the exact DP doesn't handle splits, so
+it's treated as a hard 16.)
 
-**結論：這是清單上影響最小的規則，比 6:5 小了 60 倍以上。**
+**Conclusion: this is the smallest-impact rule on the list, more than 60x
+smaller than 6:5.**
 
-### 連續洗牌機 (CSM)
+### Continuous shuffling machine (CSM)
 
-真實 CSM 是把每手用過的牌連續送回機器重洗，沒有「發到剩幾張就切牌重洗」
-這件事。開啟後：
+A real CSM continuously feeds each hand's used cards back into the
+machine and reshuffles, with no "deal until some number of cards are
+left, then cut and reshuffle." With it enabled:
 
-* `penetration` 設定會被忽略（GUI 會把那個欄位灰掉）
-* 每一手開始前都是全新洗好的牌（`core/shoe.py` 的 `Shoe.start_round()`
-  在 `csm=True` 時無條件重洗，不再檢查有沒有到切牌點）
-* **算牌完全沒用**：牌靴重洗時 `running_count` 會重設回基準值，所以真數
-  永遠貼近 0（不平衡系統則貼近它的 IRC），這是重洗機制本身自動帶出來的
-  正確結果，不需要另外針對算牌策略特別處理
+* The `penetration` setting is ignored (the GUI grays out that field)
+* Every hand starts from a freshly shuffled deck (`core/shoe.py`'s
+  `Shoe.start_round()` unconditionally reshuffles when `csm=True`,
+  without checking the cut card at all)
+* **Card counting is completely useless**: `running_count` resets to
+  baseline every reshuffle, so the true count always stays near 0 (or
+  near an unbalanced system's IRC) -- this is a correct result that falls
+  naturally out of the reshuffling mechanism itself, with no special-
+  casing needed for counting strategies
 
 ```bash
-python3 cli.py --hands 20000000 --csm            # 開 CSM
-python3 cli.py --hands 20000000 --sweep csm       # 比較有無 CSM
+python3 cli.py --hands 20000000 --csm            # enable CSM
+python3 cli.py --hands 20000000 --sweep csm       # compare with/without CSM
 ```
 
-### no-peek 的精確解：`core/solver.py` 現在正確處理了
+### The exact solution for no-peek: `core/solver.py` now handles it correctly
 
-原本 `core/solver.py` 只有 peek 的算法（BJ 在決策前就結算掉，直接用
-「已確認沒 BJ」的條件機率）。no-peek 不一樣：玩家補牌/停牌/加倍時完全
-不知道莊家有沒有 BJ，每個動作的真正 EV 要疊加「莊家真的有 BJ」那個分支：
+`core/solver.py` originally only had the peek algorithm (BJ settles
+before any decision, using the conditional probability of "already
+confirmed no BJ" directly). no-peek is different: the player hits/stands/
+doubles with no idea whether the dealer has BJ, so every action's real EV
+has to add in the branch where the dealer really does have BJ:
 
-    EV(動作) = p_bj × EV_莊家有BJ(這個動作最終押了多少注)
-             + (1-p_bj) × EV_已確認沒BJ(這個動作)
+    EV(action) = p_bj x EV_dealer_has_BJ(however much this action ultimately wagered)
+               + (1-p_bj) x EV_confirmed_no_BJ(this action)
 
-推導出幾個重點（`core/solver.py` 的 `solve()` docstring 有完整版本）：
+A few key results fall out of the derivation (`core/solver.py`'s
+`solve()` docstring has the full version):
 
-* **停牌／補牌的決策不受影響**——同一個押注倍率下，BJ 分支的懲罰是
-  同一個常數，不影響哪個選項比較好，所以延續階段（`best_continue`）
-  完全不用改。
-* **加倍會被影響**：加倍把押注拉到 2 倍，`LOSS_ALL`（追加注全輸）下
-  等於多冒一注去賭一個「其實已經確定會輸」的莊家 BJ；`OBO`（只輸原注）
-  沒有這個額外風險，所以 OBO 下加倍的**決策**（不是絕對 EV 數值）
-  跟 peek 完全一樣——這個等價關係已經用蒙地卡羅獨立驗證過，
-  也收進 `test_solver.py` 當永久回歸測試。
-* **投降的語意分三種**：peek 的 late、以及任何情況下的 early，都是
-  固定 -0.5；no-peek 的 late 比較不值錢，因為投降後莊家才翻出 BJ 的話
-  要輸全額（`p_bj×(-1) + (1-p_bj)×(-0.5)`，比固定 -0.5 差）。
+* **Standing/hitting decisions are unaffected** -- at a fixed wager
+  multiplier, the BJ-branch penalty is the same constant regardless of
+  which option is better, so the continuation phase (`best_continue`)
+  needs no changes at all.
+* **Doubling is affected**: doubling pulls the wager to 2x, and under
+  `LOSS_ALL` (lose all extra wagers) that's an extra unit of risk taken
+  on to bet against a dealer BJ that's "actually already certain to have
+  happened"; `OBO` (loses only the original bet) carries no such extra
+  risk, so OBO's doubling **decision** (not its absolute EV value) is
+  identical to peek's -- this equivalence has already been independently
+  verified against Monte Carlo, and is captured as a permanent regression
+  test in `test_solver.py`.
+* **Surrender has three distinct semantics**: peek's late, and early
+  under any mode, are both a flat -0.5; no-peek's late is worth less,
+  because if the dealer reveals a BJ after the surrender, the full bet is
+  lost (`p_bj x (-1) + (1-p_bj) x (-0.5)`, worse than a flat -0.5).
 
-`compare_to_table()` 也一併修正了兩個會誤判成「表格錯誤」的假警報：
-沒有考慮規則合不合法（例如「莊家 A 不可投降」該退回補牌卻被當成
-表格寫錯）、以及沒有考慮 `SURRENDER_EARLY` 模式下真正決定要不要投降的
-是 `early_surrender()` 前置檢查，不是 hard 表本身。
+`compare_to_table()` also got two false-positive fixes for cases it was
+misjudging as "table errors": not accounting for rule legality (e.g. "no
+surrender vs. dealer ace" should fall back to a hit, but was flagged as a
+table mistake), and not accounting for the fact that under
+`SURRENDER_EARLY`, what actually decides whether to surrender is the
+`early_surrender()` pre-check, not the hard table itself.
 
-**結論**：拿新版精確解窮舉檢查 `wynn_macau` 跟 `walkerhill_seoul` 這兩個
-預設的完整規則，`strategies/basic.json` 一格都不用改——早期手動抄的
-`early_surrender` 名單剛好是對的，OBO 下的加倍門檻在數學上也證明跟
-peek 一樣。這也回答了「套用預設賭場後 strategy 要不要客製化表」的問題：
-**不需要每個賭場複製一份表**，用同一張表 + 條件式 override（跟 H17
-那組一樣的機制）就夠了，只是這次驗證下來這兩家賭場剛好都不需要新增
-override。
+**Conclusion**: exhaustively checking the `wynn_macau` and
+`walkerhill_seoul` presets' complete rule sets against the new exact
+solution, `strategies/basic.json` needs zero changes -- the
+`early_surrender` list, hand-transcribed early on, turned out to be
+correct, and OBO's doubling threshold is mathematically proven identical
+to peek's. This also answers "does applying a casino preset need a
+customized strategy table": **no need to clone a table per casino** -- the
+same table plus conditional overrides (the same mechanism used for the
+H17 differences) is enough; it just so happens neither of these two
+casinos required any new overrides.
 
-**但這不代表表格「看起來」一定正確**：GUI 的策略表檢視器跟情境試算
-分頁一開始都只呼叫 `effective_cell_label()`/`Strategy.decide()`，兩者
-都不知道 early surrender 有 `es_vs_ace`/`es_vs_ten` 這份獨立名單——
-真正牌局裡（`core/engine.py`）投降是在 `decide()` 被問到之前就用這份
-名單決定掉的，hard 表本身的 Rh 格子在 EARLY 模式下根本不會被查。套用
-澳門永利後，硬 14 對 10 這格畫面顯示補牌，但真實牌局其實會投降——這是
-畫面沒跟上，不是 `basic.json` 錯。已修好：`effective_cell_label()` 現在
-可以多傳一個 `strategy` 參數，傳了就會先查 es 名單再決定顯示字母，
-`core/solver.py` 的 `compare_to_table()` 跟 `ui.py` 的表格檢視器/情境
-試算都已經改用這個統一路徑，不再各自維護一份重複邏輯。回歸測試收在
-`test_strategy.py`。
+**But that doesn't mean the table "looks" correct**: the GUI's strategy
+table viewer and scenario tester tab both originally only called
+`effective_cell_label()`/`Strategy.decide()`, and neither knew about the
+separate `es_vs_ace`/`es_vs_ten` list that early surrender uses -- in real
+gameplay (`core/engine.py`), surrender is decided by this list *before*
+`decide()` is even asked, and the hard table's Rh cells are never queried
+at all under EARLY mode. After applying Wynn Macau, hard 14 vs. 10
+displayed as hit on screen, but real gameplay actually surrenders there --
+the display just hadn't caught up, not a `basic.json` error. Now fixed:
+`effective_cell_label()` can take an extra `strategy` argument, and when
+given one, checks the es list before resolving the display letter;
+`core/solver.py`'s `compare_to_table()` and `ui.py`'s table viewer/
+scenario tester now both go through this same unified path instead of
+each maintaining a duplicate copy of the logic. The regression test lives
+in `test_strategy.py`.
 
-（順帶一提：套用澳門永利後表上大多數 5/6/7/12/13/14/17 對 A 沒有標投降
-不是 bug——這家賭場「莊家 A 不給投降」，這幾格在真實牌局裡本來就不會
-觸發 early surrender，跟外面查到的通用 early surrender 圖表對不上是
-規則差異，不是表格算錯。）
+(Side note: after applying Wynn Macau, most of 5/6/7/12/13/14/17 vs. ace
+not being marked surrender on the table isn't a bug -- this casino simply
+doesn't allow surrender vs. an ace, so those cells never trigger early
+surrender in real gameplay; not matching a generic early-surrender chart
+found elsewhere is a genuine rule difference, not a table error.)
 
-### 規則之間的連動
+### How the rules interact
 
-* **莊家 peek 開啟**時，BJ 在玩家動作前就結算完畢，因此
-  沒有 early surrender，OBO 也沒有意義（本來就只輸原始注）。
-  `normalize()` 會自動修正並回報原因，GUI 則直接鎖住對應控制項。
-* **no-peek 的 late surrender** 碰到莊家 BJ 要輸**全額**；
-  **early surrender** 則不管莊家有沒有 BJ 都只輸**一半**。
-  這個差別正是 early surrender 值錢的原因。
+* With **dealer peek on**, BJ is fully settled before the player acts, so
+  there's no early surrender, and OBO is meaningless (only the original
+  bet was ever at risk anyway). `normalize()` corrects this automatically
+  and reports why; the GUI locks the corresponding controls.
+* **No-peek's late surrender** loses the **full bet** on a dealer BJ;
+  **early surrender** always loses only **half**, regardless of whether
+  the dealer has BJ. This difference is exactly why early surrender is
+  worth more.
 
 ---
 
-## 賭場規則預設：`presets/*.json`
+## Casino Rule Presets: `presets/*.json`
 
-知道某家賭場的實際規則，不想每次手動勾一堆選項——GUI「賭場規則」分頁
-最上面有個「賭場預設（一鍵帶入）」，選一個按「套用」，底下所有規則欄位
-會自動設好。CLI 對應 `--preset NAME`（會忽略其他 `--decks`/`--h17` 等
-個別規則參數）。
+Know a specific casino's actual rules and don't want to click through a
+pile of options every time -- at the top of the GUI's "Casino Rules" tab
+there's a "Casino Presets (One-Click)" box: pick one, press "Apply," and
+every rule field below gets set automatically. The CLI equivalent is
+`--preset NAME` (this ignores all the other individual `--decks`/`--h17`/
+etc. rule flags).
 
-新增一家賭場就是丟一個新的 JSON 進 `presets/`：
+Adding a new casino just means dropping a new JSON into `presets/`:
 
 ```jsonc
 {
-  "name": "顯示名稱",
-  "description": "一行說明",
-  "rules": {                     // 只填你知道的欄位，其餘沿用 Rules 的預設值
+  "name": "Display name",
+  "description": "One-line description",
+  "rules": {                     // only fill in the fields you know; the rest fall back to Rules' defaults
     "continuous_shuffle": true,
     "num_decks": 6,
     "dealer_hits_soft_17": false,
@@ -199,18 +231,21 @@ override。
 }
 ```
 
-按「套用」不會在畫面上顯示任何文字說明或提示——直接把每個規則欄位設成
-JSON 裡寫的值，跟你自己手動一個一個勾成那樣完全等價，沒有額外的訊息要看。
-內附的預設檔裡每個欄位都是使用者確認過的規則；如果你自己加新預設、某些
-欄位是用猜的，建議直接寫在 `description` 裡提醒自己，或乾脆先查證完再寫
-進去（`description` 只出現在下拉選單，不會在套用後跳出來）。
+Pressing "Apply" shows no text explanation or notice on screen at all --
+it just sets every rule field to the value written in the JSON, exactly
+equivalent to checking each box by hand yourself, with no extra message
+to read. Every field in the bundled presets is a rule the user has
+confirmed; if you add your own preset with some fields guessed, it's
+worth noting that in `description` as a reminder to yourself, or just
+verifying it before writing it in (`description` only shows up in the
+dropdown, it never pops up after applying).
 
-內附的預設：
+Bundled presets:
 
-| 檔名 | 賭場 | 規則 |
+| Filename | Casino | Rules |
 |---|---|---|
-| `wynn_macau` | 澳門永利 (Wynn Macau) | CSM／S17／任兩張可加倍／no-peek／early surrender（莊家A不可投降）／OBO／BJ 3:2／A 只分一次各補一張 |
-| `walkerhill_seoul` | 首爾華克山莊 (Walkerhill Seoul) | peek／S17／任兩張可加倍／DAS／late surrender（莊家A可投降）／莊家BJ通殺／6副牌 penetration 75%／BJ 3:2／A 最多分4手各補一張 |
+| `wynn_macau` | Wynn Macau | CSM / S17 / double on any two cards / no-peek / early surrender (no surrender vs. dealer ace) / OBO / BJ 3:2 / aces split only once, one card each |
+| `walkerhill_seoul` | Walkerhill Seoul | peek / S17 / double on any two cards / DAS / late surrender (surrender vs. dealer ace allowed) / dealer BJ crushes all bets / 6 decks, 75% penetration / BJ 3:2 / aces resplit up to 4 hands, one card each |
 
 ```bash
 python3 cli.py --list-presets
@@ -219,387 +254,452 @@ python3 cli.py --preset wynn_macau --hands 20000000
 
 ---
 
-## 策略檔：`strategies/*.json`
+## Strategy Files: `strategies/*.json`
 
-策略內容全部在 JSON 裡，改完存檔即可（GUI 有「重新載入策略檔」按鈕，不用重開）。
-新增策略就是丟一個新的 `.json` 進 `strategies/`，它會自動出現在 CLI 與 GUI 的清單裡。
+All strategy content lives in JSON -- just edit and save (the GUI has a
+"reload strategy files" button, no restart needed). Adding a strategy
+just means dropping a new `.json` into `strategies/`; it automatically
+appears in both the CLI's and GUI's lists.
 
-### 格子的寫法
+### Cell notation
 
-每一列是 **10 個以空白分隔的格子**，依序對應莊家明牌 `2 3 4 5 6 7 8 9 10 A`。
-用的是真實策略表的標註方式：
+Each row is **10 space-separated cells**, in order for dealer upcard
+`2 3 4 5 6 7 8 9 10 A`. It follows the same notation as real strategy charts:
 
-| 格子 | 意思 |
+| Cell | Meaning |
 |---|---|
-| `H` | 補牌 |
-| `S` | 停牌 |
-| `D`（或 `Dh`） | 加倍；**不能加倍就補牌** |
-| `Ds` | 加倍；**不能加倍就停牌** |
-| `Y` 或 `P` | 分牌 |
-| `Ph` | 分牌；**不能分就往下查硬牌／軟牌表** ← 用來表達「有 DAS 才分」 |
-| `N` | 不分牌，往下查硬牌／軟牌表（只用於對子表） |
-| `Rh` / `Rs` / `Rp` | 投降；不能投降就 **補牌／停牌／分牌** |
+| `H` | Hit |
+| `S` | Stand |
+| `D` (or `Dh`) | Double; **hit if doubling isn't allowed** |
+| `Ds` | Double; **stand if doubling isn't allowed** |
+| `Y` or `P` | Split |
+| `Ph` | Split; **fall through to the hard/soft table if splitting isn't allowed** <- expresses "split only with DAS" |
+| `N` | Don't split, fall through to the hard/soft table (pair table only) |
+| `Rh` / `Rs` / `Rp` | Surrender; **hit/stand/split** if surrender isn't allowed |
 
-有退路的寫法很重要：規則關掉某個動作時（例如這桌不給投降、
-或分牌後不給加倍），引擎會自動走退路，不用另外準備一張表。
+The fallback notation matters: when a rule disables some action (this
+table doesn't offer surrender, or doesn't allow doubling after a split),
+the engine automatically falls back, with no need to prepare a separate table.
 
-### 檔案結構
+### File layout
 
 ```jsonc
 {
   "name": "hi-lo",
-  "description": "基本策略 + Hi-Lo 算牌",
-  "extends": "basic",                    // 繼承另一個策略檔的表
+  "description": "Basic strategy + Hi-Lo card counting",
+  "extends": "basic",                    // inherits another strategy file's tables
 
-  "tables": {                            // 策略表本體
+  "tables": {                            // the strategy tables themselves
     "hard": { "16": "S  S  S  S  S  H  H  Rh Rh Rh" },
     "soft": { "18": "S  Ds Ds Ds Ds S  S  H  H  H" },
     "pair": { "8":  "Y  Y  Y  Y  Y  Y  Y  Y  Y  Y" }
   },
 
-  "overrides": [                         // 依規則生效的差異格
+  "overrides": [                         // rule-conditional cell differences
     { "when": {"dealer_hits_soft_17": true},
-      "description": "H17 的 6 格差異",
+      "description": "the 6 cells that differ under H17",
       "cells": [
         {"table": "hard", "row": "11", "dealer": "A", "action": "D"}
       ] }
   ],
 
-  "counting": {                          // 有這段就是算牌策略
-    "balanced": true,                    // true=用真數，false=用流水數（KO 那種）
+  "counting": {                          // presence of this block means it's a counting strategy
+    "balanced": true,                    // true=uses the true count, false=uses the running count (like KO)
     "tags": {"2": 1, "10": -1, "A": -1},
-    "start_count": 4,                    // 不平衡系統的 IRC
-    "start_count_per_deck": -4           //   IRC = start_count + 每副 × 副數
+    "start_count": 4,                    // starting running count for unbalanced systems (IRC)
+    "start_count_per_deck": -4           //   IRC = start_count + this x number of decks
   },
-  "betting": { "ramp": [[1,1],[2,2],[3,4],[4,8],[5,12]] },   // [計數門檻, 注碼倍數]
+  "betting": { "ramp": [[1,1],[2,2],[3,4],[4,8],[5,12]] },   // [count threshold, bet multiplier]
   "insurance": { "min_count": 3 },
 
-  "deviations": [                        // 依計數偏離基本策略
+  "deviations": [                        // count-based deviations from basic strategy
     {"table":"hard","row":"16","dealer":"10","min_count":0,"action":"Rs"},
     {"table":"hard","row":"12","dealer":"4","max_count":0,"action":"H"}
   ],
 
-  "early_surrender": {                   // 只在 no-peek + early surrender 生效
+  "early_surrender": {                   // only active under no-peek + early surrender
     "vs_ace": [5,6,7,12,13,14,15,16,17],
     "vs_ten": [14,15,16]
   }
 }
 ```
 
-`when` 可以用任何規則欄位（`dealer_hits_soft_17`、`num_decks`、
-`double_after_split`、`surrender_vs_ace`…），值相等就套用。
+`when` can use any rules field (`dealer_hits_soft_17`, `num_decks`,
+`double_after_split`, `surrender_vs_ace`, ...) -- it applies whenever the
+value matches.
 
-任何策略名稱加上 **`-fixed`** 後綴代表忽略 `overrides`，
-例如 `basic-fixed` 永遠用 S17/DAS 的表 —— 拿來量「用錯策略表要付多少代價」。
+Any strategy name with a **`-fixed`** suffix skips `overrides` entirely --
+e.g. `basic-fixed` always uses the S17/DAS table -- used to measure "what
+does it cost to use the wrong strategy table."
 
-### 內附的策略
+### Bundled strategies
 
-| 名稱 | 說明 |
+| Name | Description |
 |---|---|
-| `basic` | 基本策略（S17 / DAS / late surrender 為基準，含 H17 差異格） |
-| `hi-lo` | Hi-Lo 算牌，只調注碼不做偏離 |
-| `hi-lo-i18` | Hi-Lo + Illustrious 18 偏離 |
-| `ko` | Knock-Out，不平衡系統，直接用流水數 |
-| `mimic-dealer` | 完全模仿莊家補到 17 |
-| `never-bust` | 硬 12 以上就停 |
-| `no-split-no-double` | 量出分牌與加倍值多少 |
-| `basic-nosplit` | 給精確 DP 交叉驗證用 |
+| `basic` | Basic strategy (baseline S17 / DAS / late surrender, includes H17 difference cells) |
+| `hi-lo` | Hi-Lo card counting, bet spread only, no deviations |
+| `hi-lo-i18` | Hi-Lo + Illustrious 18 deviations |
+| `ko` | Knock-Out, an unbalanced system, reads the running count directly |
+| `mimic-dealer` | Fully mimics the dealer, hits to 17 |
+| `never-bust` | Stands on any hard 12+ |
+| `no-split-no-double` | Measures how much splitting and doubling are worth |
+| `basic-nosplit` | Used for exact-DP cross-checking |
 
-### 實測：算牌策略對比
+### Measured: card-counting strategy comparison
 
-6 副牌 / penetration 75% / 每項 6000 萬手，注碼階梯 1-12 單位：
+6 decks / 75% penetration / 60 million hands each, bet spread 1-12 units:
 
-| 策略 | 每 100 手 EV | ±95% CI | 每回合 SD | 平均注碼 | 對 action 的優勢 |
+| Strategy | EV per 100 hands | +/-95% CI | SD per round | Avg. bet | Edge on action |
 |---|---|---|---|---|---|
-| `basic` | −0.342 u | 0.029 | 1.14 | 1.00 | −0.302% |
+| `basic` | -0.342 u | 0.029 | 1.14 | 1.00 | -0.302% |
 | `hi-lo` | +1.153 u | 0.073 | 2.88 | 1.60 | +0.632% |
 | **`hi-lo-i18`** | **+1.427 u** | 0.076 | 2.99 | 1.60 | **+0.772%** |
 | `ko` | +1.237 u | 0.078 | 3.09 | 1.60 | +0.679% |
 
-Illustrious 18 的偏離比純調注碼多賺約 **24%**（+0.274 u/100 手），
-而且不用多下一分錢注碼 —— 平均注碼三者都是 1.60。
+The Illustrious 18 deviations earn about **24%** more than bet-spreading
+alone (+0.274 u/100 hands), without wagering an extra cent -- all three
+have the same 1.60 average bet.
 
-注意算牌策略的每回合標準差是平注的 2.5 倍以上（下注階梯造成），
-所以要達到同樣的統計精度需要更多手數。
+Note that a counting strategy's per-round standard deviation is more than
+2.5x a flat-bet strategy's (caused by the bet spread), so achieving the
+same statistical precision needs more hands.
 
-圖：`results/counting.png`
+Chart: `results/counting.png`
 
-### 要新增「算牌策略 2」的話
+### Adding a "counting strategy 2"
 
-複製 `hi-lo.json` 改名，調 `tags`（換計數系統）、`ramp`（換下注階梯）、
-`deviations`（換偏離表），存進 `strategies/` 就好。然後：
+Copy `hi-lo.json`, rename it, adjust `tags` (swap the counting system),
+`ramp` (swap the bet spread), `deviations` (swap the deviation table), and
+save it into `strategies/`. Then:
 
 ```bash
-python3 cli.py --hands 50000000 --strategy hi-lo hi-lo-i18 你的新策略
+python3 cli.py --hands 50000000 --strategy hi-lo hi-lo-i18 your-new-strategy
 ```
 
-同一組牌靴會餵給每個策略（共用亂數），差異最容易分辨。
+The same shoe is fed to every strategy (Common Random Numbers), making
+differences easiest to resolve.
 
 ---
 
-## 我的策略打得對不對？——策略表檢視器 + 情境試算
+## Is My Strategy Correct? -- Strategy Table Viewer + Scenario Tester
 
-GUI 有兩個工具專門回答「這桌規則下，這手牌真正該怎麼打」，而不是要你去
-外面抄一張可能不適用你這桌規則的表：
+The GUI has two tools dedicated to answering "under this table's rules,
+how should this hand actually be played" -- instead of making you copy a
+chart from somewhere that may not even apply to your table's rules:
 
-### 策略表檢視器（分頁「策略表」）
+### Strategy table viewer (the "Strategy Table" tab)
 
-把 `strategies/*.json` 裡任何一個策略的硬牌／軟牌／對子表，套用目前左側
-設定的規則（H17 的差異格、DAS 的 `Ph` 分支等會自動編譯進去），畫成彩色
-格子表。算牌策略還會多列一節「算牌偏離」（依真數/流水數變動的格子，
-這種是條件式的，畫不進靜態格子表）。改完 JSON 按「重新載入策略檔」，
-這裡也會跟著更新。
+Takes any strategy's hard/soft/pair tables from `strategies/*.json`,
+applies the rules currently set on the left (H17 difference cells, DAS's
+`Ph` branches, etc. are compiled in automatically), and renders them as a
+color-coded grid. A counting strategy also gets an extra "counting
+deviations" section (cells that change with true/running count -- these
+are conditional and can't be drawn into a static grid). Edit the JSON and
+press "reload strategy files," and this view updates too.
 
-### 情境試算（分頁「情境試算」）
+### Scenario tester (the "Scenario Tester" tab)
 
-指定玩家兩張牌＋莊家明牌，按「計算」會給兩層答案：
+Specify the player's two cards plus the dealer's upcard, press "Compute,"
+and get two layers of answers:
 
-1. **精確解**（`core/solver.py`，瞬間算完，零抽樣誤差）：不含分牌的
-   補/停/加倍/投降怎麼選最好。存在的意義是給你一個立即、不用等的參考值。
-2. **蒙地卡羅**（`core/scenario.py`，用你設定的實際副數，包含分牌選項）：
-   每個合法動作各跑你指定的手數，回報 EV ± 95% CI，由好到壞排序。
+1. **Exact solution** (`core/solver.py`, computed instantly, zero
+   sampling error): the best of hit/stand/double/surrender, splits
+   excluded. Exists to give you an immediate reference with no wait.
+2. **Monte Carlo** (`core/scenario.py`, uses your actual configured deck
+   count, split option included): each legal action is run for however
+   many hands you specify, reporting EV +/- 95% CI, sorted best to worst.
 
-跑完會自動跟策略表現在建議的動作比較，並判斷差距有沒有超過兩邊 95% CI
-合計——蒙地卡羅結果跟策略表不一樣，**不代表策略表錯了**，可能只是抽樣
-雜訊。差距沒超過誤差範圍會提示「分不出來，加大手數再看看」；真的超過
-才會標記「這格可能真的該改」。跟主流程一樣，沒勾「固定種子」的話每次
-按「計算」都會重新抽一個種子，才看得出結果本來就會有波動。
+Once it finishes, it's automatically compared against what the strategy
+table currently recommends, checking whether the gap exceeds the combined
+95% CI of both sides -- a Monte Carlo result differing from the strategy
+table **doesn't mean the table is wrong**, it might just be sampling
+noise. A gap within the margin of error gets a "not resolvable yet, try
+more hands" note; only a gap that genuinely exceeds it gets flagged "this
+cell might really need to change." Just like the main flow, a fresh seed
+is drawn every time you press "compute" unless "fixed seed" is checked,
+so you can see that results naturally fluctuate.
 
-### 把發現寫回策略表
+### Writing a finding back to the strategy table
 
-差距顯著時（不是雜訊，是統計上真的分得出來），結果下面會出現一顆按鈕：
-「把這格更新成『X』寫回 xxx.json」。按下去會問一次確認，接受後：
+When the gap is significant (not noise -- genuinely statistically
+resolvable), a button appears below the results: "Write this cell back to
+xxx.json as 'X'." Clicking it asks for confirmation once, and on accepting:
 
-* 順著策略檔的 `extends` 繼承鏈往上找到**真正定義這一格的檔案**再改
-  （例如用 `hi-lo` 測，改的其實是它繼承的 `basic.json`，不是改
-  `hi-lo.json`——`hi-lo.json` 本來就沒有自己的表可以改）
-* 新格子的「退路」（不能做這個動作時要退到哪）由**次佳動作**決定，不是
-  隨便選：例如最佳是加倍、次佳是停牌，寫回去的就是 `Ds`（加倍否則停牌）
-  而不是 `D`（加倍否則補牌）——退路也是蒙地卡羅量出來的，不是猜的
-* 如果這格目前被某個 `overrides`（例如 H17 差異格）蓋過，會先提醒你
-  「改基礎表可能不會生效」，因為 override 的優先權更高——這種情況要
-  手動去改 JSON 的 `overrides` 區段，工具不會自動幫你改那個
-* 改完立刻重新載入策略檔，策略表檢視器馬上看得到新結果
+* It walks up the strategy file's `extends` inheritance chain to find the
+  file that **actually defines this cell** before editing it (e.g.
+  testing with `hi-lo` actually edits `basic.json`, which it inherits
+  from, not `hi-lo.json` -- `hi-lo.json` never had its own table to edit
+  in the first place)
+* The new cell's "fallback" (where to fall back to when this action isn't
+  allowed) is determined by the **runner-up action**, not chosen
+  arbitrarily: e.g. if the best action is double and the runner-up is
+  stand, it writes back `Ds` (double, else stand), not `D` (double, else
+  hit) -- the fallback is also measured by Monte Carlo, not guessed
+* If this cell is currently overridden by something (e.g. an H17
+  difference cell), you're warned up front that "editing the base table
+  may not take effect," because the override takes priority -- that case
+  needs manually editing the JSON's `overrides` section; the tool won't
+  do that for you automatically
+* Strategy files are reloaded immediately after editing, and the strategy
+  table viewer shows the new result right away
 
-只有**統計顯著**的差距才會出現這顆按鈕——差距在誤差範圍內時不給更新選項，
-避免把抽樣雜訊寫死進策略表。想更新那種邊際格子，先把手數加大到差距穩定
-顯著再說。
+This button only appears for **statistically significant** gaps -- a gap
+within the margin of error gets no update option, avoiding baking
+sampling noise into the strategy table permanently. To update one of
+those marginal cells, run more hands first until the gap becomes
+consistently significant.
 
-### 為什麼要兩層，不能只用精確解？
+### Why two layers -- why not just the exact solution?
 
-因為分牌牽扯 DAS、RSA、再分牌的組合爆炸，精確解代價太高，只有蒙地卡羅
-辦得到「含分牌」的完整比較。但精確解有蒙地卡羅比不上的優點：零誤差、
-瞬間算完，可以當一個快速、可信賴的錨點。
+Because splits bring in a combinatorial explosion of DAS, RSA, and
+resplitting, making an exact solution too expensive -- only Monte Carlo
+can do a complete comparison "including splits." But the exact solution
+has an advantage Monte Carlo can't match: zero error, computed instantly,
+making it a fast, trustworthy anchor point.
 
-**這個設計意外挖到一個真正有意思的發現，值得記錄**：拿 solver 的精確解
-去對照 `basic.json`，S17 規則下只有一格不一致——`A,2 對 5`。solver 說
-補牌比加倍好（EV 0.1334 vs 0.1260），但 `basic.json`（照抄自多數公開
-文獻）寫的是加倍。查下去發現：
+**This design accidentally turned up a genuinely interesting finding,
+worth recording**: cross-checking the solver's exact solution against
+`basic.json`, only one cell disagrees under S17 rules -- `A,2 vs. 5`. The
+solver says hitting beats doubling (EV 0.1334 vs. 0.1260), but
+`basic.json` (transcribed from most published references) says double.
+Digging in:
 
-* solver 走的是**無限牌組**（跟 `core/exact.py` 一貫的假設）
-* 用 200 副牌去跑蒙地卡羅（逼近無限牌組），結果跟 solver 一致：補牌贏
-* 用**你實際設定的 6 副牌**去跑蒙地卡羅，結果反過來：加倍贏
-  （EV 0.1386 vs 0.1379，非常接近）
+* The solver walks an **infinite deck** (the same assumption
+  `core/exact.py` always makes)
+* Running Monte Carlo at 200 decks (approximating an infinite deck)
+  agrees with the solver: hitting wins
+* Running Monte Carlo at **your actually configured 6 decks** flips it:
+  doubling wins (EV 0.1386 vs. 0.1379, very close either way)
 
-也就是說，**兩邊都沒有算錯**，只是回答了不同的問題——solver 給的是
-「理論極限」，蒙地卡羅給的是「你這桌實際規則」的答案，而這一格剛好是
-副數會讓答案翻盤的邊際情況。`solve_cell`/`compare_to_table` 因此把
-差距在 1% 以內的不一致標成 `deck_sensitive`，代表「答案可能因副數而異，
-不代表策略表寫錯」，這種格子該用情境試算的蒙地卡羅（用你實際的副數）
-才準，不要只信精確解。
+In other words, **neither side is wrong** -- they're just answering
+different questions. The solver gives you the "theoretical limit,"
+Monte Carlo gives you the answer for "this table's actual rules," and
+this cell happens to be a marginal case where deck count flips the
+answer. `solve_cell`/`compare_to_table` therefore flags mismatches within
+1% as `deck_sensitive`, meaning "the answer may depend on deck count,
+this doesn't necessarily mean the table is wrong" -- for a cell like
+that, trust the scenario tester's Monte Carlo (at your actual deck count),
+not the exact solution alone.
 
-順帶一提，這個交叉驗證**真的抓到過一個表格錯誤**：`basic.json` 原本把
-硬 14 對莊家 10 也標成投降（`Rh`），但標準投降表裡硬 14 從來不該投降
-——只有硬 15 對 10、硬 16 對 9/10/A 才投降。精確解量出這格少賺 3.37%
-（遠超過副數邊際效應的 1% 門檻），用 `write_cell()` 修正後
-`python3 test_solver.py` 才變成全過。看起來是當初寫檔案時從第 15 列
-複製格式手滑複製過頭（兩列字串原本一模一樣，這本身就很可疑）。
+Side note: this cross-check **did genuinely catch a real table error**:
+`basic.json` originally had hard 14 vs. dealer 10 marked as surrender
+(`Rh`) too, but under a standard surrender table, hard 14 should never
+surrender -- only hard 15 vs. 10, and hard 16 vs. 9/10/A, do. The exact
+solution measured this cell as costing 3.37% in EV (far above the 1%
+deck-margin threshold), and after fixing it with `write_cell()`,
+`python3 test_solver.py` went fully green. It looks like a copy-paste
+slip when the file was originally written, copying the format from row
+15 and going one row too far (the two row strings were originally
+identical, which was itself suspicious).
 
-這證明了這套交叉驗證機制是真的有用的，不是擺著好看。順帶一提，`core/solver.py`
-不處理分牌（見它開頭的說明），所以這層交叉驗證**看不到對子表的錯誤**——
-後來在另一次全面回歸測試時，`test_strategy.py` 額外抓到對子表也有同一類
-錯誤（`8,8 對 10` 被標成投降，應該是分牌，少賺約 3%），一併用同一套
-`write_cell()` 修正。這也是為什麼 `test_engine.py`（用疊好的牌直接測
-分牌路徑）跟 `test_strategy.py`（測編譯後的表格內容）要跟 `test_solver.py`
-（精確解交叉驗證，但看不到分牌）一起跑、缺一不可——三層各自的驗證範圍
-不完全重疊，合起來才不會有死角。
+This proves the cross-check mechanism is genuinely useful, not just for
+show. Side note: `core/solver.py` doesn't handle splits (see its header),
+so this layer of cross-checking **can't see errors in the pair table** --
+later, during another full regression pass, `test_strategy.py`
+additionally caught the same class of error in the pair table too (`8,8
+vs. 10` was marked surrender, when it should be split, costing about 3%
+in EV), fixed the same way with `write_cell()`. This is also why
+`test_engine.py` (tests the split path directly with a stacked deck),
+`test_strategy.py` (tests the compiled table contents), and
+`test_solver.py` (exact-solution cross-checking, but blind to splits) all
+need to run together, none dispensable -- the three layers' coverage
+doesn't fully overlap, and only together do they leave no blind spots.
 
 `python3 test_engine.py && python3 test_strategy.py && python3 test_solver.py`
-現在全部通過，`strategies/basic.json` 目前已知沒有真正的表格錯誤
-（唯一的差異就是那個副數邊際效應）。
+all pass now, and `strategies/basic.json` is currently known to have no
+genuine table errors (the only remaining discrepancy is that deck-margin effect).
 
 ---
 
-## 要跑幾手才夠？
+## How Many Hands Are Enough?
 
-每手損益的標準差約 **1.14 個單位**，所以
+The standard deviation of per-hand results is about **1.14 units**, so
 
-$$\text{95\% 信賴區間} = \pm 1.96 \times \frac{1.14}{\sqrt{N}}$$
+$$\text{95\% CI} = \pm 1.96 \times \frac{1.14}{\sqrt{N}}$$
 
-| 手數 | 95% CI | 能分辨什麼 |
+| Hands | 95% CI | What it can resolve |
 |---|---|---|
-| 10 萬 | ±0.71% | 只夠看出 6:5 這種巨大差異 |
-| 100 萬 | ±0.22% | 連 H17 都只是勉強擦邊 |
-| 1000 萬 | ±0.071% | 夠分辨 H17、DAS、加倍限制 |
-| **1 億** | **±0.022%** | 夠分辨投降、RSA 這種 0.08% 級距 |
+| 100K | +/-0.71% | Only enough to see a huge difference like 6:5 |
+| 1M | +/-0.22% | Even H17 is barely at the edge of resolvable |
+| 10M | +/-0.071% | Enough to resolve H17, DAS, doubling restrictions |
+| **100M** | **+/-0.022%** | Enough to resolve a 0.08%-scale rule like surrender or RSA |
 
-**重點：一百萬手不足以比較規則。** 賭場優勢本身只有約 0.4%，
-而你想量的規則差異多半在 0.08–0.22% 之間。
+**Key point: one million hands isn't enough to compare rules.** The house
+edge itself is only about 0.4%, and the rule differences you're likely
+trying to measure are mostly in the 0.08-0.22% range.
 
-CLI 與 GUI 都會在跑之前先告訴你這次的預期精度。
+Both the CLI and GUI tell you the expected precision for a given run before it starts.
 
-### 共用亂數（Common Random Numbers）
+### Common Random Numbers (CRN)
 
-比較多個設定時，所有設定都用**同一組 seed**，也就是同一副洗好的牌。
-多數手牌兩邊決策相同、拿到的牌也相同，差值為 0，
-所以「A 減 B」的變異數遠小於各自的變異數，同樣手數能分辨更小的差異。
+When comparing multiple configurations, all of them use the **same
+seed** -- that is, the same shuffled shoe. Most hands make the same
+decision and draw the same cards on both sides, so the difference is 0,
+meaning the variance of "A minus B" is far smaller than either side's own
+variance, letting the same number of hands resolve much smaller differences.
 
-但書：一旦某手決策不同，之後的牌序就會錯開，配對不是完美的。
+Caveat: once one hand's decision diverges, the card sequences after it
+drift apart, so the pairing isn't perfect from that point on.
 
 ---
 
-## 效能
+## Performance
 
-實測（8 核 macOS）：
+Measured (8-core macOS):
 
-| 手數 | 牆鐘時間 |
+| Hands | Wall time |
 |---|---|
-| 100 萬 | 約 1 秒 |
-| 1000 萬 | 約 8 秒 |
-| 1 億 | 約 75 秒 |
-| 10 億 | 約 12 分鐘 |
+| 1M | ~1 second |
+| 10M | ~8 seconds |
+| 100M | ~75 seconds |
+| 1B | ~12 minutes |
 
-蒙地卡羅本質是 O(n)，這是最優的 —— 少跑樣本就拿不到精度。
-所以優化的重點在常數因子：
+Monte Carlo is inherently O(n), which is already optimal -- fewer samples
+just means less precision. So optimization focuses on the constant factor:
 
-* 平行化的單位是 chunk（每段 25 萬回合），跨核心負載平衡，也讓取消能在數秒內生效
-* 手牌點數是增量更新，不重複 `sum()`
-* 動作用 int bitmask，決策熱路徑上不配置 set
-* 統計只累加純量（`sum` / `sumsq`），不保留每一手的結果 ——
-  一億手若全存要 0.8 GB
-* 資金曲線在模擬階段就降採樣成約 2000 點；螢幕只有約 2000 px 寬，
-  畫一百萬個點其中 99.8% 疊在同一個像素上
+* The unit of parallelism is a chunk (250K rounds each), load-balanced
+  across cores, which also lets cancellation take effect within a few seconds
+* Hand totals are updated incrementally, never re-summed with `sum()`
+* Actions are int bitmasks, avoiding set allocation on the decision hot path
+* Statistics only accumulate scalars (`sum` / `sumsq`), never keeping
+  every hand's result -- storing all of them for a hundred million hands
+  would take 0.8 GB
+* Bankroll curves are downsampled to about 2000 points during the
+  simulation itself; the screen is only about 2000 px wide, and plotting
+  a million points would stack 99.8% of them on the same pixel
 
-想再快 10–30 倍可以直接用 PyPy 跑 `core/`（它不依賴 matplotlib）。
+For another 10-30x, run `core/` directly under PyPy (it has no dependency on matplotlib).
 
 ---
 
-## 正確性驗證
+## Correctness Verification
 
-`python3 verify.py [每項回合數]` 分三層，由強到弱：
+`python3 verify.py [rounds per test]` has three layers, from strongest to weakest:
 
-**第 1 層 — 精確 DP 交叉驗證（最強）**
-`core/exact.py` 用無限牌組把所有牌序按機率加權求和，零誤差、零隨機。
-模擬端關掉分牌、改用 200 副牌逼近無限牌組，兩者必須吻合。
+**Layer 1 -- exact DP cross-check (strongest)**
+`core/exact.py` sums over every card sequence weighted by probability at
+an infinite deck, with zero error and zero randomness. The simulation
+side disables splits and uses 200 decks to approximate an infinite deck;
+the two must agree.
 
-實測差距 **0.0008%（S17）與 0.0079%（H17）**，
-證明補牌 / 停牌 / 加倍 / 莊家邏輯 / 結算完全正確。
+Measured gap of **0.0008% (S17) and 0.0079% (H17)**, proving hit / stand
+/ double / dealer logic / settlement are all completely correct.
 
-**第 1.5 層 — 確定性單元測試**（`test_engine.py` 30 項 + `test_strategy.py` 57 項）
+**Layer 1.5 -- deterministic unit tests** (`test_engine.py`, 35 checks +
+`test_strategy.py`, 60 checks)
 
-統計測試能告訴你整體 EV 對不對，但分牌這類分支出錯時只會讓數字偏一點點，
-很難定位。`test_engine.py` 用疊好的牌指定發牌順序，26 項逐手斷言，
-涵蓋分牌上限、分 A、RSA/HSA、DAS、投降時機、peek/no-peek/OBO、S17/H17。
+Statistical tests can tell you whether the overall EV is right, but when
+a branch like splitting is broken, it usually only skews the numbers
+slightly, hard to pin down. `test_engine.py` uses a stacked deck with a
+fixed deal order for hand-by-hand assertions, covering the split cap,
+splitting aces, RSA/HSA, DAS, surrender timing, peek/no-peek/OBO, and S17/H17.
 
-`test_strategy.py` 另外涵蓋策略檔本身：格子語法與退路、`Ph` 隨 DAS 編譯、
-`overrides` 的生效條件、`-fixed` 後綴、`extends` 繼承、算牌標籤、
-下注階梯、Illustrious 18 的偏離門檻、KO 的 IRC 隨副數變化，以及錯誤訊息。
+`test_strategy.py` separately covers the strategy file mechanics: cell
+syntax and fallbacks, `Ph` compiling based on DAS, `overrides`'
+activation conditions, the `-fixed` suffix, `extends` inheritance,
+counting tags, the bet ramp, the Illustrious 18's deviation thresholds,
+KO's IRC scaling with deck count, and error messages.
 
-這一層抓到過兩個統計測試看不出來的 bug：
+This layer has caught two bugs that the statistical tests couldn't see:
 
-* 分 A 之後直接跳出決策迴圈，導致**第一手**拿到第二張 A 時不會觸發 RSA，
-  第二手卻會 —— 行為不對稱。
-* `decide()` 裡投降的兩個判斷該互斥卻寫成連續判斷，讓 **8,8 對 9/10/A
-  跑去投降而不是分牌**（16 點命中了一般硬點數的投降表）。
+* Breaking out of the decision loop right after splitting aces meant RSA
+  never triggered when the **first** hand drew a second ace, while it did
+  for the second hand -- asymmetric behavior.
+* Two surrender checks in `decide()` that should have been mutually
+  exclusive were written as sequential checks instead, causing **8,8 vs.
+  9/10/A to surrender instead of split** (the 16-point total hit the
+  generic hard-total surrender entry).
 
-**第 2 層 — 已知常數**
+**Layer 2 -- known constants**
 
-| 指標 | 精確值 | 模擬值 |
+| Metric | Exact value | Simulated value |
 |---|---|---|
-| 莊家終局分布 S17（17/18/19/20/21/爆） | 14.51 / 13.95 / 13.35 / 18.03 / 12.01 / 28.16% | 全部落在 ±0.25% 內 |
-| 莊家爆牌率 H17 | 28.54% | 28.56% |
-| 玩家 natural 頻率 | 4.749% | 4.747% |
-| 每回合標準差 | ≈1.14 | 1.137 |
+| Dealer final-outcome distribution, S17 (17/18/19/20/21/bust) | 14.51 / 13.95 / 13.35 / 18.03 / 12.01 / 28.16% | All within +/-0.25% |
+| Dealer bust rate, H17 | 28.54% | 28.56% |
+| Player natural frequency | 4.749% | 4.747% |
+| Per-round standard deviation | ~1.14 | 1.137 |
 
-**第 3 層 — 與文獻的賭場優勢對照**（每項 1 億手）
+**Layer 3 -- comparison against published house-edge figures** (100M hands each)
 
-| 規則 | 模擬 | 文獻 | 差 |
+| Rules | Simulated | Literature | Diff |
 |---|---|---|---|
-| 6D S17 DAS 無投降 3:2 | +0.4133% ±0.0226 | 0.40% | +0.013% |
-| 6D S17 DAS LS 3:2 | +0.3430% ±0.0224 | 0.33% | +0.013% |
-| 6D H17 DAS LS 3:2 | +0.5367% ±0.0224 | 0.51% | +0.027% |
+| 6D S17 DAS no-surrender 3:2 | +0.4133% +/-0.0226 | 0.40% | +0.013% |
+| 6D S17 DAS LS 3:2 | +0.3430% +/-0.0224 | 0.33% | +0.013% |
+| 6D H17 DAS LS 3:2 | +0.5367% +/-0.0224 | 0.51% | +0.027% |
 
-本模擬用的是**總點數型**基本策略表（只看總點數），
-而文獻數字通常假設**牌組成型**策略（會看是哪幾張牌湊成的），
-後者約多賺 0.02–0.04%。所以模擬結果穩定比文獻高 0.013–0.027% 是正常的，
-第 1 層已經證明引擎本身無誤。
+This simulator uses a **total-based** basic strategy table (only looking
+at the hand's total), while published figures usually assume a
+**composition-based** strategy (which also looks at exactly which cards
+make up the total), earning roughly 0.02-0.04% more. So the simulation
+consistently landing 0.013-0.027% above the literature is expected --
+layer 1 has already proven the engine itself is correct.
 
 ---
 
-## 常用指令
+## Common Commands
 
 ```bash
-# 單一設定，一億手，八條資金曲線
+# single configuration, one hundred million hands, eight bankroll curves
 python3 cli.py --hands 100000000 --sessions 8
 
-# 策略對比（共用亂數）
+# strategy comparison (Common Random Numbers)
 python3 cli.py --hands 20000000 --strategy basic hi-lo mimic never-bust no-sp-dbl
 
-# 規則掃描
+# rule sweeps
 python3 cli.py --hands 20000000 --sweep decks
 python3 cli.py --hands 20000000 --sweep peek
 
-# 自訂規則
+# custom rules
 python3 cli.py --hands 20000000 --decks 8 --h17 --no-das --surrender none --bj-pays 1.2
 
-# 歐式無底牌 + early surrender + OBO
+# European no-hole-card + early surrender + OBO
 python3 cli.py --hands 20000000 --no-peek --surrender early --obo
 ```
 
-`--sweep` 可用：`decks` `h17` `das` `surrender` `peek` `rsa` `double` `bj`
+`--sweep` accepts: `decks` `h17` `das` `surrender` `peek` `rsa` `double` `bj`
 
-`--strategy` 可用：
+`--strategy` accepts:
 
-| 名稱 | 說明 |
+| Name | Description |
 |---|---|
-| `basic` | 基本策略（表隨規則自動調整） |
-| `basic-fixed` | 永遠用 6D S17 DAS 標準表，可看出用錯表的代價 |
-| `hi-lo` | 基本策略 + Hi-Lo 真數下注階梯 + 真數 ≥3 買保險 |
-| `no-sp-dbl` | 基本策略但不分牌不加倍，量出這兩個動作值多少 |
-| `mimic` | 完全模仿莊家補到 17 |
-| `never-bust` | 硬 12 以上就停 |
+| `basic` | Basic strategy (table adapts automatically to the rules) |
+| `basic-fixed` | Always uses the standard 6D S17 DAS table, showing the cost of using the wrong table |
+| `hi-lo` | Basic strategy + Hi-Lo true-count bet ramp + insurance at true count >=3 |
+| `no-sp-dbl` | Basic strategy but never splits or doubles, measuring how much those two actions are worth |
+| `mimic` | Fully mimics the dealer, hits to 17 |
+| `never-bust` | Stands on any hard 12+ |
 
 ---
 
-## 實測結果（每項 1 億手，95% CI ±0.022%）
+## Measured Results (100M hands each, 95% CI +/-0.022%)
 
-基準：6D S17 DAS 任兩張可加倍 LS peek 3:2 → 賭場優勢 **+0.356%**
+Baseline: 6D S17 DAS double-on-any-two LS peek 3:2 -> house edge **+0.356%**
 
-| 規則變化 | 賭場優勢 | 相對基準 | 文獻 |
+| Rule change | House edge | Relative to baseline | Literature |
 |---|---|---|---|
-| BJ 只賠 6:5 | +1.714% | **+1.358%** | +1.39% |
+| BJ pays only 6:5 | +1.714% | **+1.358%** | +1.39% |
 | H17 | +0.562% | +0.206% | +0.22% |
-| 只有 10/11 可加倍 | +0.545% | +0.189% | +0.21% |
-| 不可 DAS | +0.495% | +0.139% | +0.14% |
-| 不可投降 | +0.434% | +0.078% | +0.08% |
-| 8 副牌 | +0.363% | +0.007% | +0.02% |
-| 2 副牌 | +0.221% | −0.135% | −0.19% |
-| 可再分 A (RSA) | +0.288% | −0.068% | −0.08% |
-| no-peek + early surrender | **−0.045%** | −0.401% | — |
+| Double only on 10/11 | +0.545% | +0.189% | +0.21% |
+| No DAS | +0.495% | +0.139% | +0.14% |
+| No surrender | +0.434% | +0.078% | +0.08% |
+| 8 decks | +0.363% | +0.007% | +0.02% |
+| 2 decks | +0.221% | -0.135% | -0.19% |
+| Resplit aces (RSA) | +0.288% | -0.068% | -0.08% |
+| no-peek + early surrender | **-0.045%** | -0.401% | -- |
 
-最後一列值得注意：歐式無底牌配上 early surrender，
-在這組規則下玩家反而有 0.045% 的優勢。
+The last row is worth noting: European no-hole-card combined with early
+surrender actually gives the player a 0.045% edge under this rule combination.
 
-圖：`results/rule_impact.png`
+Chart: `results/rule_impact.png`
 
 ---
 
-## 統計指標說明
+## Statistical Metrics Explained
 
-| 指標 | 意義 |
+| Metric | Meaning |
 |---|---|
-| 賭場優勢 | −淨損益 ÷ 原始注碼總額。正值代表賭場贏 |
-| action / 原始注 | 含加倍與分牌的追加注，約 1.13 |
-| N0 | 要打幾回合，期望獲利才追得上一個標準差 |
-| 破產機率 | `exp(-2 × 本金 × EV / 變異數)`，無限手數下的近似值 |
-| 最大回撤 | 從資金高點跌下來的最大幅度（跨 chunk 精確計算） |
+| House edge | -net result / total original wagers. Positive means the house wins |
+| Action / initial bet | Includes extra wagers from doubling and splitting, about 1.13 |
+| N0 | How many rounds until expected profit catches up to one standard deviation |
+| Risk of ruin | `exp(-2 x bankroll x EV / variance)`, an approximation over an unbounded number of hands |
+| Max drawdown | The largest drop from a bankroll peak (computed exactly across chunk boundaries) |

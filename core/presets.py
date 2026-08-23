@@ -1,17 +1,19 @@
-"""賭場規則預設檔：一鍵帶入某家賭場的完整規則。
+"""Casino rule presets: apply one casino's complete rule set in one click.
 
-跟 core/strategy.py 的策略檔是同一種設計哲學——規則內容放在
-presets/*.json，不寫死在程式碼裡，新增一家賭場就是丟一個新的 JSON 檔案
-進 presets/，不用碰 Python。
+Same design philosophy as core/strategy.py's strategy files — the rule
+content lives in presets/*.json rather than being hardcoded, so adding a
+new casino just means dropping a new JSON file into presets/, no Python
+required.
 
-每個檔案結構：
+Each file looks like:
     {
-      "name": "顯示名稱",
-      "description": "一行說明",
-      "rules": { ...Rules 的欄位... }
+      "name": "Display name",
+      "description": "One-line description",
+      "rules": { ...fields of Rules... }
     }
 
-"rules" 底下只要填你知道的欄位，沒填的欄位沿用 core.rules.Rules 的預設值。
+Under "rules" you only need to fill in the fields you actually know;
+anything omitted falls back to core.rules.Rules' defaults.
 """
 import json
 import os
@@ -33,23 +35,23 @@ class PresetError(Exception):
 def _load_json(name):
     path = PRESET_DIR / f"{name}.json"
     if not path.exists():
-        raise PresetError(f"找不到預設檔 {path}")
+        raise PresetError(f"Preset file not found: {path}")
     with open(path, encoding='utf-8') as f:
         try:
             return json.load(f)
         except json.JSONDecodeError as e:
-            raise PresetError(f"{path} 不是合法的 JSON：{e}")
+            raise PresetError(f"{path} is not valid JSON: {e}")
 
 
 def available():
-    """列出 presets/ 底下所有預設檔（依檔名排序）。"""
+    """List every preset file under presets/ (sorted by filename)."""
     if not PRESET_DIR.exists():
         return []
     return sorted(p.stem for p in PRESET_DIR.glob('*.json'))
 
 
 def describe():
-    """回傳 [(檔名, 顯示名稱, 說明), ...]，給 CLI/GUI 列表用。"""
+    """Return [(filename, display name, description), ...] for CLI/GUI listing."""
     out = []
     for name in available():
         try:
@@ -61,11 +63,12 @@ def describe():
 
 
 def load(name):
-    """讀一個預設檔，回傳 (Rules, notes)。notes 是 normalize() 的修正訊息
-    （規則本身互相矛盾時才會有，例如 CSM 讓 penetration 失效）。"""
+    """Load a preset file, returning (Rules, notes). notes are normalize()'s
+    correction messages (only present when the rules genuinely conflict,
+    e.g. CSM making penetration meaningless)."""
     spec = _load_json(name)
     raw = spec.get('rules', {})
     unknown = set(raw) - _VALID_FIELDS
     if unknown:
-        raise PresetError(f"{name}.json 有不認得的規則欄位：{', '.join(sorted(unknown))}")
+        raise PresetError(f"{name}.json has unrecognized rule field(s): {', '.join(sorted(unknown))}")
     return normalize(Rules(**raw))

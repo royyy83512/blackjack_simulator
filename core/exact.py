@@ -1,10 +1,13 @@
-"""無限牌組的精確計算（不抽樣，零誤差）。
+"""Exact infinite-deck computation (no sampling, zero error).
 
-存在的意義是當引擎的「金標準」：對所有牌序按機率加權求和，
-拿來跟蒙地卡羅模擬對照。兩者吻合 => 補牌/停牌/加倍/莊家邏輯/結算正確。
+This exists to be the engine's "gold standard": sum over every card
+sequence weighted by its probability, then cross-check against the Monte
+Carlo simulation. If they agree, hitting/standing/doubling/dealer logic/
+settlement are all correct.
 
-分牌沒有納入（精確處理分牌要另外一套遞迴，工程量差一個量級），
-所以交叉驗證時模擬端也要關掉分牌。
+Splits are not modeled (handling splits exactly would need a whole
+separate recursion, an order of magnitude more work), so the simulation
+side must also disable splits when cross-checking against this module.
 """
 from functools import lru_cache
 
@@ -12,13 +15,14 @@ from .engine import ACT_STAND, ACT_DOUBLE, ACT_HIT
 from .rules import Rules, SURRENDER_NONE
 from .strategy import make
 
-# 無限牌組下各點數的機率
+# probability of each rank in an infinite deck
 P = tuple((r, 4 / 52 if r < 10 else 16 / 52) for r in range(1, 11))
 
 
 @lru_cache(None)
 def dealer_from(s, aces, h17):
-    """從 (點數和, A 數) 打到底：回傳 (17,18,19,20,21,爆) 的機率。"""
+    """Play out from (total, ace count) to the end: returns the
+    probabilities of (17,18,19,20,21,bust)."""
     soft = aces > 0 and s + 10 <= 21
     t = s + 10 if soft else s
     if t > 21:
@@ -35,7 +39,8 @@ def dealer_from(s, aces, h17):
 
 @lru_cache(None)
 def dealer_distribution(h17=False):
-    """莊家起手兩張打到底的非條件終局分布（21 含 blackjack）。"""
+    """The dealer's unconditional final-outcome distribution starting from
+    two fresh cards (21 includes blackjack)."""
     out = [0.] * 6
     for c1, p1 in P:
         for c2, p2 in P:
@@ -47,7 +52,7 @@ def dealer_distribution(h17=False):
 
 @lru_cache(None)
 def dealer_given_up(up, h17):
-    """莊家明牌為 up 且已確認沒有 BJ 時的終局分布。"""
+    """The dealer's final-outcome distribution given upcard `up` and no BJ."""
     holes = [(h, p) for h, p in P if not ((up == 1 and h == 10) or (up == 10 and h == 1))]
     z = sum(p for _h, p in holes)
     out = [0.] * 6
@@ -72,9 +77,11 @@ def _ev_stand(total, up, h17):
 
 
 def no_split_edge(h17=False, blackjack_pays=1.5):
-    """精確賭場優勢：無限牌組、不分牌、不投降、任兩張可加倍。
+    """Exact house edge: infinite deck, no splits, no surrender, doubling
+    allowed on any two cards.
 
-    用的是 core.strategy 的同一份表，所以能直接跟模擬對照。
+    Uses the same table from core.strategy, so it can be compared directly
+    against the simulation.
     """
     rules = Rules(dealer_hits_soft_17=h17, surrender=SURRENDER_NONE,
                   insurance_offered=False)
@@ -93,9 +100,10 @@ def no_split_edge(h17=False, blackjack_pays=1.5):
         if total == 21:
             return _ev_stand(21, up, h17)
         d = 9 if up == 1 else up - 2
-        # 策略表的每一格是 (主要動作, 不能做時的退路)。
-        # 這裡不模擬分牌也不模擬投降，所以合法動作只有補／停／(可加倍時)加倍，
-        # 其餘一律走退路 —— 跟引擎的解析方式一致。
+        # each strategy table cell is (primary action, fallback if not allowed).
+        # Splits and surrender aren't modeled here, so the only legal actions
+        # are hit/stand/(double if allowed), and anything else falls back —
+        # matching how the engine itself resolves a cell.
         act, fallback = (tbl.soft if soft else tbl.hard)[total][d]
         legal = ACT_HIT | ACT_STAND | (ACT_DOUBLE if can_double else 0)
         if not (act & legal):

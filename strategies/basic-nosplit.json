@@ -1,6 +1,6 @@
 {
   "name": "basic-nosplit",
-  "description": "基本策略但永不分牌（給 core/exact.py 的精確 DP 交叉驗證用）",
+  "description": "Basic strategy but never splits (used for core/exact.py's exact-DP cross-check)",
   "extends": "basic",
   "tables": {
     "pair": {

@@ -1,34 +1,41 @@
-"""策略載入器。
+"""Strategy loader.
 
-策略內容全部放在 strategies/*.json，程式碼只負責讀檔、編譯、決策。
-要新增或調整策略就改 JSON，不用碰 Python。
+All strategy content lives in strategies/*.json; the code only handles
+loading, compiling, and deciding. To add or tweak a strategy, edit the
+JSON — no need to touch Python.
 
-格子的寫法（跟真實策略表的標註方式一致）
-------------------------------------------
-    H     補牌
-    S     停牌
-    D     加倍；不能加倍就補牌      （Dh 是同義寫法）
-    Ds    加倍；不能加倍就停牌
-    P     分牌                     （對子表也可寫 Y）
-    Ph    分牌；不能分就往下查硬牌／軟牌表   ← 用來表達「有 DAS 才分」
-    N     不分牌，往下查硬牌／軟牌表   （只用於對子表）
-    Rh    投降；不能投降就補牌
-    Rs    投降；不能投降就停牌
-    Rp    投降；不能投降就分牌
+Cell notation (matches how real strategy charts are usually written)
+----------------------------------------------------------------------
+    H     hit
+    S     stand
+    D     double; hit if not allowed          (Dh is a synonym)
+    Ds    double; stand if not allowed
+    P     split                               (pair table may also write Y)
+    Ph    split; fall through to the hard/soft table if not allowed
+          <- expresses "split only with DAS"
+    N     don't split, fall through to the hard/soft table (pair table only)
+    Rh    surrender; hit if not allowed
+    Rs    surrender; stand if not allowed
+    Rp    surrender; split if not allowed
 
-每一列是 10 個以空白分隔的格子，依序對應莊家明牌 2 3 4 5 6 7 8 9 10 A。
+Each row is 10 space-separated cells, in order for dealer upcard
+2 3 4 5 6 7 8 9 10 A.
 
-檔案結構
---------
-    name / description            策略名稱與說明
-    extends                       繼承另一個策略檔的表（算牌策略通常繼承 basic）
-    tables.hard / soft / pair     策略表本體
-    overrides[]                   依規則生效的差異格（例如 H17 的 6 格）
-    counting                      計數標籤；有這段就是算牌策略
-    betting.ramp                  依計數決定注碼倍數
-    insurance.min_count           計數到多少開始買保險
-    deviations[]                  依計數偏離基本策略的格（例如 Illustrious 18）
-    early_surrender               no-peek 專用的 early surrender 表
+File layout
+-----------
+    name / description            strategy name and description
+    extends                       inherits another strategy file's tables
+                                   (counting strategies usually extend basic)
+    tables.hard / soft / pair     the strategy tables themselves
+    overrides[]                   rule-conditional cell overrides (e.g. the
+                                   6 cells that differ under H17)
+    counting                      count tags; presence means this is a
+                                   counting strategy
+    betting.ramp                  bet multiplier as a function of the count
+    insurance.min_count           count threshold for taking insurance
+    deviations[]                  count-based deviations from basic strategy
+                                   (e.g. the Illustrious 18)
+    early_surrender                the no-peek-only early surrender table
 """
 import json
 import os
@@ -41,9 +48,9 @@ STRATEGY_DIR = Path(os.environ.get(
     'BJ_STRATEGY_DIR', Path(__file__).resolve().parent.parent / 'strategies'))
 
 COLUMNS = ('2', '3', '4', '5', '6', '7', '8', '9', '10', 'A')
-FALLTHROUGH = 0          # 對子表用：這格不分牌，往下查硬牌／軟牌表
+FALLTHROUGH = 0          # pair table only: don't split, fall through to the hard/soft table
 
-# 格子 -> (主要動作, 不合法時的退路)
+# cell -> (primary action, fallback if illegal)
 TOKENS = {
     'H':  (ACT_HIT, None),
     'S':  (ACT_STAND, None),
@@ -57,11 +64,13 @@ TOKENS = {
     'Rs': (ACT_SURRENDER, ACT_STAND),
     'Rp': (ACT_SURRENDER, ACT_SPLIT),
 }
-# Ph 要看規則有沒有 DAS，載入時才決定，見 _compile_row()
+# Ph depends on whether the rules have DAS, resolved at load time — see _compile_row()
 
-# TOKENS 的反查表：拿編譯過的 (動作, 退路) 元組還原成一個字母顯示。
-# 'Y'/'P' 跟 'D'/'Dh' 編譯結果相同，只留一個當標準寫法；
-# dict 後蓋前，寫在後面的會贏，所以下面刻意把想要的顯示字母放最後。
+# Reverse lookup for TOKENS: turns a compiled (action, fallback) tuple back
+# into a single display letter. 'Y'/'P' and 'D'/'Dh' compile to the same
+# tuple, so only one is kept as the canonical spelling; later entries win
+# when a dict is built from repeated keys, so the letters we want to display
+# are deliberately placed last below.
 _CELL_LABEL = {}
 for _tok, _cell in TOKENS.items():
     _CELL_LABEL[_cell] = _tok
@@ -71,13 +80,16 @@ del _tok, _cell
 
 
 def cell_label(cell):
-    """把編譯過的 (動作, 退路) 格子還原成字母，給策略表檢視器用。
+    """Turn a compiled (action, fallback) cell back into a letter, for the
+    strategy table viewer.
 
-    cell 可能是 None（表裡沒有這一列，例如總點數超出範圍）。
+    cell may be None (no such row in the table, e.g. a total out of range).
 
-    注意：這個函式只是「字面上翻譯」，不會管這格在目前的規則下合不合法。
-    JSON 裡寫 Rh（投降，不能投降就補牌）永遠顯示 R，不管這桌到底給不給
-    投降、給不給對莊家 A 投降——那個判斷要用 effective_cell_label()。
+    Note: this is a purely literal translation — it doesn't check whether
+    this cell is actually legal under the current rules. A JSON cell
+    written as Rh (surrender, hit if not allowed) always displays as R,
+    regardless of whether this table offers surrender at all, or against
+    a dealer ace specifically — that check belongs to effective_cell_label().
     """
     if cell is None:
         return ''
@@ -89,26 +101,36 @@ _ACT_LETTER = {ACT_STAND: 'S', ACT_HIT: 'H', ACT_DOUBLE: 'D',
 
 
 def effective_cell_label(cell, up, rules, hard_total, is_soft, strategy=None):
-    """把格子依「這桌規則下這一格實際合不合法」解析成最終會發生的動作。
+    """Resolve a cell into the action that will actually happen under this
+    table's rules.
 
-    這是策略表檢視器該用的版本：JSON 裡寫的 Rh（投降，不能投降就補牌）
-    在「莊家 A 不給投降」或「這桌根本不給投降」的規則下，投降這個選項
-    在起手兩張就不合法，退路邏輯要跟 core.strategy.Strategy._resolve()
-    做一樣的事，只是這裡不需要真的建一手牌去問 core.engine.legal_actions()
-    ——起手兩張要不要加倍只看點數/軟硬，要不要投降只看莊家明牌，直接用
-    Rules 的方法算就好，不用兩邊維護同一段邏輯還要保持同步（分牌後的
-    legal_actions() 還要處理已分牌次數、from_split 這些跟這裡無關的狀態）。
+    This is the version the strategy table viewer should use: a JSON cell
+    written as Rh (surrender, hit if not allowed) is not a legal choice on
+    the first two cards when "dealer doesn't allow surrender against an
+    ace" or "this table has no surrender at all" — the fallback logic here
+    has to match core.strategy.Strategy._resolve() exactly. It doesn't need
+    to actually build a hand and ask core.engine.legal_actions() though:
+    whether doubling is allowed on the first two cards only depends on the
+    total/hard-vs-soft, and whether surrender is allowed only depends on
+    the dealer's upcard, so we can just call straight into Rules' own
+    methods instead of maintaining the same logic in two places and keeping
+    them in sync (legal_actions() after a split also has to handle split
+    count and from_split state that's irrelevant here).
 
-    up: 莊家明牌（1..10，1 是 A）
-    hard_total: 這手牌不算軟手加值的原始點數和（軟 18 是 A,7，這裡填 8）
-    is_soft: 這手牌算不算軟手
+    up: dealer's upcard (1..10, 1 is an ace)
+    hard_total: this hand's raw card total not counting the soft-ace bonus
+        (soft 18 is A,7, so pass 8 here)
+    is_soft: whether this hand is soft
 
-    strategy: 選填。SURRENDER_EARLY 模式下，真正決定要不要投降的是
-    core.engine.play_round 裡「decide() 之前」的 Strategy.early_surrender()
-    前置檢查（查 early_surrender 區塊的 es_vs_ace/es_vs_ten 清單），不是
-    hard 表裡的 Rh 格子——那些格子在 EARLY 模式下根本不會被問到。傳入
-    strategy 才能讓這個函式跟真正的牌局行為一致；不傳的話（例如還沒載入
-    策略檔時）就只看表格本身，早期投降的格子會顯示成表格原本寫的動作。
+    strategy: optional. Under SURRENDER_EARLY, what actually decides
+    whether to surrender is the Strategy.early_surrender() pre-check in
+    core.engine.play_round, which runs *before* decide() is ever called
+    (it consults the es_vs_ace/es_vs_ten lists in the early_surrender
+    block) — not the Rh cells in the hard table, which never even get
+    asked in EARLY mode. Passing strategy in is what makes this function
+    match real gameplay; without it (e.g. before a strategy file is
+    loaded), only the table itself is consulted, and early-surrender cells
+    display whatever the table happens to say.
     """
     if (strategy is not None and not is_soft and rules.surrender == SURRENDER_EARLY
             and rules.surrender_allowed_vs(up)
@@ -135,7 +157,7 @@ class StrategyError(Exception):
 
 
 def card_key(k):
-    """把 'A' / '1' / 'T' / '10' 這些寫法統一成 1..10。"""
+    """Normalize 'A' / '1' / 'T' / '10' and friends to 1..10."""
     k = str(k).strip().upper()
     if k in ('A', 'ACE', '1'):
         return 1
@@ -144,14 +166,14 @@ def card_key(k):
     try:
         v = int(k)
     except ValueError:
-        raise StrategyError(f"看不懂的牌面 '{k}'")
+        raise StrategyError(f"Unrecognized card value '{k}'")
     if not 2 <= v <= 10:
-        raise StrategyError(f"牌面超出範圍：{k}")
+        raise StrategyError(f"Card value out of range: {k}")
     return v
 
 
 def dealer_index(up):
-    """莊家明牌 -> 欄位索引：2..10 -> 0..8，A -> 9。"""
+    """Dealer upcard -> column index: 2..10 -> 0..8, A -> 9."""
     return 9 if up == 1 else up - 2
 
 
@@ -165,38 +187,38 @@ def column_index(name):
 def _token(cell, das, where):
     cell = cell.strip()
     if cell == 'Ph':
-        # 「有 DAS 才分牌」——規則在載入時就確定了，直接編譯掉
+        # "split only with DAS" — the rule is known at load time, so resolve it now
         return (ACT_SPLIT, FALLTHROUGH) if das else (FALLTHROUGH, None)
     try:
         return TOKENS[cell]
     except KeyError:
         raise StrategyError(
-            f"{where}：看不懂的格子 '{cell}'，可用：{', '.join(sorted(TOKENS))}, Ph")
+            f"{where}: unrecognized cell '{cell}', valid values: {', '.join(sorted(TOKENS))}, Ph")
 
 
 def _compile_row(row, das, where):
     cells = row.split() if isinstance(row, str) else list(row)
     if len(cells) != 10:
-        raise StrategyError(f"{where}：需要 10 格（莊家 2-10,A），實際 {len(cells)} 格：{row}")
+        raise StrategyError(f"{where}: expected 10 cells (dealer 2-10,A), got {len(cells)}: {row}")
     return tuple(_token(c, das, where) for c in cells)
 
 
 def _load_json(name):
     path = STRATEGY_DIR / f"{name}.json"
     if not path.exists():
-        raise StrategyError(f"找不到策略檔 {path}")
+        raise StrategyError(f"Strategy file not found: {path}")
     with open(path, encoding='utf-8') as f:
         try:
             return json.load(f)
         except json.JSONDecodeError as e:
-            raise StrategyError(f"{path} 不是合法的 JSON：{e}")
+            raise StrategyError(f"{path} is not valid JSON: {e}")
 
 
 def _merge_spec(name, seen=None):
-    """處理 extends 繼承鏈，回傳合併後的設定。"""
+    """Walk the extends inheritance chain and return the merged spec."""
     seen = seen or []
     if name in seen:
-        raise StrategyError(f"策略 extends 形成循環：{' -> '.join(seen + [name])}")
+        raise StrategyError(f"Strategy extends form a cycle: {' -> '.join(seen + [name])}")
     spec = _load_json(name)
     parent = spec.get('extends')
     if not parent:
@@ -220,14 +242,14 @@ def _merge_spec(name, seen=None):
 def _matches(when, rules):
     for key, want in (when or {}).items():
         if not hasattr(rules, key):
-            raise StrategyError(f"override 的條件 '{key}' 不是規則欄位")
+            raise StrategyError(f"Override condition '{key}' is not a rules field")
         if getattr(rules, key) != want:
             return False
     return True
 
 
 class Strategy:
-    """由 JSON 檔驅動的策略。"""
+    """A strategy driven by a JSON spec."""
 
     def __init__(self, spec, rules, apply_overrides=True):
         self.name = spec.get('name', '?')
@@ -236,7 +258,7 @@ class Strategy:
 
         tables = spec.get('tables') or {}
         if not tables.get('hard'):
-            raise StrategyError(f"策略 '{self.name}' 沒有 hard 表")
+            raise StrategyError(f"Strategy '{self.name}' has no hard table")
         self.hard = {int(k): _compile_row(v, das, f"{self.name}.hard[{k}]")
                      for k, v in tables.get('hard', {}).items()}
         self.soft = {int(k): _compile_row(v, das, f"{self.name}.soft[{k}]")
@@ -252,7 +274,7 @@ class Strategy:
                     for cell in ov.get('cells', []):
                         self._set_cell(cell, das)
 
-        # ---- 算牌相關 ----
+        # ---- card counting ----
         cnt = spec.get('counting')
         self.count_tags = None
         self.start_count = 0
@@ -263,7 +285,8 @@ class Strategy:
                 tags[card_key(k)] = v
             self.count_tags = tuple(tags)
             self.use_true_count = bool(cnt.get('balanced', True))
-            # 不平衡系統的起始流水數 = 常數 + 每副牌的量（KO 的 IRC = 4 - 4N）
+            # starting running count for unbalanced systems = constant + per-deck term
+            # (KO's IRC = 4 - 4N)
             self.start_count = int(cnt.get('start_count', 0))
             if cnt.get('start_count_per_deck'):
                 self.start_count += int(round(
@@ -274,7 +297,7 @@ class Strategy:
         ins = spec.get('insurance') or {}
         self.insurance_min = ins.get('min_count')
 
-        # 偏離：(表, 列, 欄) -> [(下限, 上限, 動作), ...]
+        # deviations: (table, row, col) -> [(min, max, action), ...]
         self.deviations = {}
         for dv in spec.get('deviations', []):
             key = (dv['table'],
@@ -289,21 +312,21 @@ class Strategy:
         self.es_vs_ace = frozenset(es.get('vs_ace', []))
         self.es_vs_ten = frozenset(es.get('vs_ten', []))
 
-    # ------------------------------------------------------------ 載入
+    # ------------------------------------------------------------ loading
     def _set_cell(self, cell, das):
         tname = cell['table']
         table = getattr(self, tname, None)
         if table is None:
-            raise StrategyError(f"override 指到不存在的表 '{tname}'")
+            raise StrategyError(f"Override references a nonexistent table '{tname}'")
         row = card_key(cell['row']) if tname == 'pair' else int(cell['row'])
         if row not in table:
-            raise StrategyError(f"override 指到不存在的列 {tname}[{cell['row']}]")
+            raise StrategyError(f"Override references a nonexistent row {tname}[{cell['row']}]")
         col = column_index(cell['dealer'])
         cells = list(table[row])
         cells[col] = _token(cell['action'], das, f"{self.name}.overrides")
         table[row] = tuple(cells)
 
-    # ------------------------------------------------------------ 決策
+    # ------------------------------------------------------------ decisions
     def count(self, shoe):
         return shoe.true_count if self.use_true_count else shoe.running_count
 
@@ -342,7 +365,8 @@ class Strategy:
 
     @staticmethod
     def _resolve(cell, legal):
-        """把 (主要動作, 退路) 解成實際動作；回不出來就傳 None 代表往下查。"""
+        """Resolve (primary action, fallback) into an actual action; None
+        means "no answer, keep looking elsewhere"."""
         if cell is None:
             return None
         act, fallback = cell
@@ -370,20 +394,20 @@ class Strategy:
         act = self._resolve(self._lookup(table, total, col, tname, c), legal)
         if act:
             return act
-        # 表上沒有這一列（例如已經 21 點）就停牌
+        # no row for this total (e.g. already 21) -> stand
         return ACT_STAND if (legal & ACT_STAND) else ACT_HIT
 
 
-# ---------------------------------------------------------------- 註冊表
+# ---------------------------------------------------------------- registry
 def available():
-    """列出 strategies/ 底下所有策略檔。"""
+    """List every strategy file under strategies/."""
     if not STRATEGY_DIR.exists():
         return []
     return sorted(p.stem for p in STRATEGY_DIR.glob('*.json'))
 
 
 def describe():
-    """回傳 [(名稱, 說明, 是否算牌)]，給 CLI 與 GUI 顯示用。"""
+    """Return [(name, description, is_counting), ...] for CLI/GUI display."""
     out = []
     for name in available():
         try:
@@ -395,14 +419,18 @@ def describe():
 
 
 def find_defining_file(name, kind, row):
-    """順著 extends 鏈往上找，回傳「誰的原始 JSON 真的定義了這一列」的策略名稱。
+    """Walk up the extends chain and return the name of the strategy whose
+    own JSON actually defines this row.
 
-    子策略沒定義某一列時會繼承父策略的（見 _merge_spec）；改動一格要改到
-    「實際生效的那份 JSON」，不是隨便改子策略檔（改了也不會生效，因為
-    子策略根本沒有這一列，查表時繼承回父策略）。找不到就回傳 None。
+    A child strategy that doesn't define a given row inherits it from its
+    parent (see _merge_spec); to edit a cell you need to edit "whichever
+    JSON is actually in effect", not just any child file (editing the
+    child wouldn't do anything, since the child has no such row and
+    lookups fall through to the parent). Returns None if not found.
 
-    name 可以帶 -fixed 後綴（跟 make() 一樣接受）——那個後綴是合成出來的
-    「不套用 overrides」變體，本身不對應實際檔案，要先去掉才找得到。
+    name may carry a -fixed suffix (accepted the same way make() does) —
+    that suffix denotes a synthesized "overrides not applied" variant that
+    doesn't correspond to an actual file, so it's stripped before lookup.
     """
     if name.endswith('-fixed'):
         name = name[:-6]
@@ -422,10 +450,13 @@ def find_defining_file(name, kind, row):
 
 
 def derive_token(best_act, fallback_act):
-    """依「蒙地卡羅測出的最佳動作」與「次佳動作」，推導出要寫回 JSON 的格子。
+    """Given the best action found by Monte Carlo simulation and the
+    runner-up action, derive the cell token to write back to the JSON.
 
-    次佳動作當退路：這格本來就沒有分牌選項可以退（分牌只能整手换，不是
-    退路關係），所以最佳動作是分牌時直接用 'P'，不用管次佳是什麼。
+    The runner-up serves as the fallback: a cell never falls back to split
+    (splitting swaps in a whole different hand, not a fallback relationship),
+    so when the best action is split we just use 'P' outright, regardless
+    of what the runner-up was.
     """
     if best_act == ACT_STAND:
         return 'S'
@@ -445,23 +476,26 @@ def derive_token(best_act, fallback_act):
 
 
 def write_cell(name, kind, row, col, token):
-    """把 (kind, row, col) 這一格改成 token，寫回實際定義它的那份 JSON 檔。
+    """Change cell (kind, row, col) to token, writing back to whichever
+    JSON file actually defines it.
 
-    row 對硬牌/軟牌表是總點數（int），對對子表是牌面（1..10，1 是 A）。
-    col 是 0..9（依 COLUMNS 順序：2..10,A）。
+    row is the total (int) for the hard/soft tables, or the card value
+    (1..10, 1 is an ace) for the pair table. col is 0..9 (following the
+    COLUMNS order: 2..10,A).
 
-    回傳實際被改到的檔案路徑；找不到定義該列的檔案時丟出 StrategyError。
+    Returns the path of the file actually modified; raises StrategyError
+    if no file defining that row can be found.
     """
     owner = find_defining_file(name, kind, row)
     if owner is None:
-        raise StrategyError(f"找不到定義 {kind}[{row}] 這一列的策略檔，"
-                            "沒辦法自動更新（可能要手動加進 JSON）")
+        raise StrategyError(f"Could not find the strategy file defining {kind}[{row}], "
+                            "can't auto-update it (you may need to add it to the JSON by hand)")
     path = STRATEGY_DIR / f"{owner}.json"
     with open(path, encoding='utf-8') as f:
         data = json.load(f)
     cells = data['tables'][kind][str(row)].split()
     if len(cells) != 10:
-        raise StrategyError(f"{path} 的 {kind}[{row}] 格式不對，不是 10 格")
+        raise StrategyError(f"{path}'s {kind}[{row}] is malformed, not 10 cells")
     cells[col] = token
     data['tables'][kind][str(row)] = '  '.join(c.ljust(2) for c in cells).rstrip()
     with open(path, 'w', encoding='utf-8') as f:
@@ -477,7 +511,7 @@ def make(name, rules, apply_overrides=True):
     try:
         spec = _merge_spec(base)
     except StrategyError as e:
-        raise SystemExit(f"{e}\n可用策略：{', '.join(available())}")
+        raise SystemExit(f"{e}\nAvailable strategies: {', '.join(available())}")
     s = Strategy(spec, rules, apply_overrides)
     if name.endswith('-fixed'):
         s.name = name
@@ -485,7 +519,7 @@ def make(name, rules, apply_overrides=True):
 
 
 class _Registry(dict):
-    """讓舊程式碼還能用 REGISTRY[name] / 'x' in REGISTRY / sorted(REGISTRY)。"""
+    """Lets older code keep using REGISTRY[name] / 'x' in REGISTRY / sorted(REGISTRY)."""
 
     def __iter__(self):
         names = available()

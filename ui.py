@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""Blackjack 模擬器 —— Tkinter 圖形介面。
+"""Blackjack simulator -- Tkinter GUI.
 
-啟動： python3 ui.py
+Launch: python3 ui.py
 
-設計說明
-* 模擬跑在背景執行緒裡（該執行緒再去驅動多核 process pool），
-  主執行緒只負責畫面，所以跑一億手時視窗仍然可以動、可以按取消。
-* 進度靠 queue 傳回主執行緒，用 after() 輪詢，不跨執行緒碰 Tk 物件。
-* 規則之間的衝突（peek / surrender / OBO）會即時鎖定對應的控制項。
-* 「每次模擬手數」欄位（self.hands）在這裡是 per-session 的手數，
-  使用者直接輸入不用心算；core.runner.run()/compare() 吃的是總回合數
-  （所有 session 加總），所以呼叫前會先乘上 sessions 再傳進去。
-  這跟 cli.py 的 --hands 語意不同 —— CLI 那個是使用者直接給總回合數，
-  沒有這層轉換。兩邊不要弄混。
+Design notes
+* The simulation runs on a background thread (which itself drives a
+  multi-core process pool); the main thread only handles drawing, so the
+  window stays responsive and cancellable even while running a hundred
+  million hands.
+* Progress is relayed back to the main thread through a queue, polled via
+  after() -- Tk objects are never touched from another thread.
+* Rule conflicts (peek / surrender / OBO) lock the corresponding controls
+  in real time.
+* The "hands per run" field (self.hands) here is the per-session hand
+  count, so the user can type it directly without doing mental math;
+  core.runner.run()/compare() take a total round count (summed across all
+  sessions), so it gets multiplied by sessions before being passed in.
+  This differs from cli.py's --hands semantics -- there, the user gives
+  the total round count directly, with no such conversion. Don't confuse
+  the two.
 """
 import os
 import queue
@@ -23,9 +29,10 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# matplotlib 與 charts 故意延遲到真的要畫圖時才載入。
-# 多核模擬用 spawn 開子行程，子行程會重新 import 本檔案；
-# 若在模組層 import matplotlib，每個 worker 都要多付約一秒的啟動成本。
+# matplotlib and charts are deliberately loaded lazily, only once a chart
+# actually needs to be drawn. The multi-core simulation spawns child
+# processes, which re-import this file; importing matplotlib at module
+# level would add roughly a second of startup cost to every worker.
 _charts = None
 _tkagg = None
 
@@ -33,9 +40,9 @@ _tkagg = None
 def _load_charts():
     global _charts, _tkagg
     if _charts is None:
-        import charts as _c                 # 它會設好 Agg 後端與中文字型
+        import charts as _c                 # sets up the Agg backend
         import matplotlib
-        matplotlib.use('TkAgg')             # 再換成 Tk 後端以便嵌入視窗
+        matplotlib.use('TkAgg')             # switch to the Tk backend so it can embed in the window
         from matplotlib.backends.backend_tkagg import (
             FigureCanvasTkAgg, NavigationToolbar2Tk)
         _charts = _c
@@ -58,7 +65,7 @@ from cli import SWEEPS
 
 CARD_VALUES = ('2', '3', '4', '5', '6', '7', '8', '9', '10', 'A')
 
-# 策略表格子的顯示顏色，跟一般策略卡的配色習慣一致。
+# Strategy table cell display colors, matching common strategy-card conventions.
 CELL_COLORS = {
     'S': '#e2e8f0', 'H': '#93c5fd', 'D': '#fb923c', 'Ds': '#fb923c', 'Dh': '#fb923c',
     'P': '#c4b5fd', 'N': '#f8fafc',
@@ -73,11 +80,14 @@ class Cancelled(Exception):
 
 
 class _StubShoe:
-    """給「問策略表現在建議什麼動作」用的假牌靴，只是要滿足 decide() 的介面。
+    """A fake shoe for "what does the strategy table currently recommend,"
+    just enough to satisfy decide()'s interface.
 
-    只在起手兩張這個時間點問一次，算牌策略此時通常還沒開始算牌
-    （真數當作 0），這裡只是要拿到「不算牌時的建議動作」當比較基準，
-    不是要模擬完整的算牌情境。
+    Only ever queried once, at the moment of the first two cards, when a
+    counting strategy usually hasn't started counting yet (true count is
+    treated as 0) -- this is only meant to get "the recommended action
+    when not counting" as a comparison baseline, not to simulate a full
+    counting scenario.
     """
     running_count = 0
     true_count = 0.0
@@ -86,37 +96,40 @@ class _StubShoe:
         pass
 
 
-# 每次模擬要打幾手（不是總回合數——那個是「每次手數 x 次數」算出來的，
-# 不用使用者自己乘除）。
-HAND_PRESETS = [('1 千', 1_000), ('1 萬', 10_000), ('10 萬', 100_000),
-                ('100 萬', 1_000_000), ('1000 萬', 10_000_000),
-                ('1 億', 100_000_000)]
+# how many hands to play per run (not the total round count -- that's
+# computed as "hands per run x number of runs," the user never has to
+# multiply it themselves).
+HAND_PRESETS = [('1K', 1_000), ('10K', 10_000), ('100K', 100_000),
+                ('1M', 1_000_000), ('10M', 10_000_000),
+                ('100M', 100_000_000)]
 
 def load_strategy_list():
-    """從 strategies/*.json 讀出可用策略。改完 JSON 按「重新載入」就會更新。"""
-    return [(f"{'⊛ ' if counting else ''}{name}", name, desc)
+    """Read the available strategies from strategies/*.json. Edit the JSON
+    and press "reload" to pick up changes."""
+    return [(f"{'* ' if counting else ''}{name}", name, desc)
             for name, desc, counting in strategy_mod.describe()]
 
-SWEEP_LABELS = [('不比較（單一設定）', ''),
-                ('比較 牌副數', 'decks'),
-                ('比較 CSM 連續洗牌機', 'csm'),
-                ('比較 莊家 A 可否投降', 'surrender-ace'),
-                ('比較 S17 / H17', 'h17'),
-                ('比較 DAS 有無', 'das'),
-                ('比較 投降規則', 'surrender'),
-                ('比較 peek / no-peek / OBO', 'peek'),
-                ('比較 分 A 規則', 'rsa'),
-                ('比較 加倍時機', 'double'),
-                ('比較 BJ 賠率 3:2 / 6:5', 'bj')]
+SWEEP_LABELS = [('No comparison (single configuration)', ''),
+                ('Compare: deck count', 'decks'),
+                ('Compare: CSM (continuous shuffler)', 'csm'),
+                ('Compare: surrender vs. dealer ace', 'surrender-ace'),
+                ('Compare: S17 / H17', 'h17'),
+                ('Compare: DAS on/off', 'das'),
+                ('Compare: surrender rules', 'surrender'),
+                ('Compare: peek / no-peek / OBO', 'peek'),
+                ('Compare: splitting aces rules', 'rsa'),
+                ('Compare: when doubling is allowed', 'double'),
+                ('Compare: BJ payout 3:2 / 6:5', 'bj')]
 
 
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('Blackjack 模擬器')
+        root.title('Blackjack Simulator')
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        # 依螢幕實際可用空間決定視窗大小，扣掉選單列/工作列大概的高度；
-        # 不要對所有螢幕都假設同一個固定高度，筆電螢幕常常比這矮。
+        # size the window to the screen's usable space, minus a rough
+        # allowance for the menu bar/dock; don't assume the same fixed
+        # height on every screen -- laptop screens are often shorter than this.
         root.geometry(f'{min(1360, sw - 60)}x{min(900, sh - 120)}')
         root.minsize(1000, 560)
         self.q = queue.Queue()
@@ -135,7 +148,7 @@ class App:
         self._fill_strategy_dropdowns()
         self._render_strategy_tables()
 
-    # ---------------------------------------------------------------- 變數
+    # ---------------------------------------------------------------- vars
     def _build_vars(self):
         v = self
         v.decks = tk.IntVar(value=6)
@@ -163,20 +176,24 @@ class App:
         v.sweep = tk.StringVar(value='')
         v.strat_vars = {}
 
-        v.status = tk.StringVar(value='就緒')
+        v.status = tk.StringVar(value='Ready')
         v.precision = tk.StringVar(value='')
         for var in (v.peek, v.surrender, v.rsa, v.csm):
             var.trace_add('write', lambda *_: self._sync_locks())
         for var in (v.hands, v.sessions):
             var.trace_add('write', lambda *_: self._update_precision())
 
-    # ---------------------------------------------------------------- 版面
+    # ---------------------------------------------------------------- layout
     def _build_layout(self):
-        # 曾經試過用 tk.Canvas 包 ttk 控制項做左欄捲動，但 macOS Aqua 主題下
-        # 那些控制項的座標／大小量起來都正常，畫面上卻整個不畫出來
-        # （ttk 在 macOS 走原生繪製，跟 Canvas 的合成流程對不上）。
-        # 改成不捲動、直接排版；「開始模擬」等按鈕仍然釘在左欄最下面
-        # （pack 時最先排進去，永遠保留得到空間），不會被規則清單擠到看不見。
+        # Once tried wrapping ttk widgets in a tk.Canvas to make the left
+        # column scrollable, but under macOS's Aqua theme those widgets'
+        # coordinates/sizes measured correctly while nothing was actually
+        # drawn on screen (ttk renders natively on macOS, which doesn't
+        # mesh with Canvas's compositing pipeline). Switched to a
+        # non-scrolling, direct layout instead; buttons like "start
+        # simulation" are still pinned to the bottom of the left column
+        # (packed in first, so they always keep their space) and never get
+        # pushed out of view by a long rule list.
         outer = ttk.Frame(self.root, padding=8)
         outer.pack(fill='both', expand=True)
         left = ttk.Frame(outer, width=330)
@@ -189,18 +206,21 @@ class App:
         run_bar = ttk.Frame(left)
         run_bar.pack(side='bottom', fill='x')
 
-        # 規則、模擬設定、策略疊在一起需要的高度加總起來超過 1000px，
-        # 矮螢幕（例如 1280x720）的視窗根本塞不下，兩欄排版也不夠（最高那欄
-        # 還是要 ~670px）。改用分頁籤：同時間只顯示一頁，需要的高度只看
-        # 最高的那一頁（約 400px），任何螢幕都放得下，不需要捲動。
+        # Rules, simulation settings, and strategy stacked together add up
+        # to well over 1000px of height -- a short screen (e.g. 1280x720)
+        # simply can't fit it, and even a two-column layout wouldn't help
+        # (the tallest column alone still needs ~670px). Switched to
+        # tabs instead: only one page is visible at a time, so the needed
+        # height is just the tallest single page (about 400px), which fits
+        # on any screen with no scrolling required.
         nb = ttk.Notebook(left)
         nb.pack(side='top', fill='both', expand=True)
         tab_rules = ttk.Frame(nb, padding=(4, 6))
         tab_sim = ttk.Frame(nb, padding=(4, 6))
         tab_strategy = ttk.Frame(nb, padding=(4, 6))
-        nb.add(tab_rules, text='賭場規則')
-        nb.add(tab_sim, text='模擬設定')
-        nb.add(tab_strategy, text='策略／對比')
+        nb.add(tab_rules, text='Casino Rules')
+        nb.add(tab_sim, text='Simulation')
+        nb.add(tab_strategy, text='Strategy / Compare')
 
         self._build_rules(tab_rules)
         self._build_sim(tab_sim)
@@ -212,20 +232,20 @@ class App:
         ttk.Label(parent, text=text).grid(row=r, column=0, sticky='w', pady=2)
 
     def _build_rules(self, parent):
-        preset_box = ttk.LabelFrame(parent, text=' 賭場預設（一鍵帶入） ', padding=8)
+        preset_box = ttk.LabelFrame(parent, text=' Casino Presets (One-Click) ', padding=8)
         preset_box.pack(fill='x', pady=(0, 8))
         row = ttk.Frame(preset_box)
         row.pack(fill='x')
         self.cb_preset = ttk.Combobox(row, width=22, state='readonly')
         self.cb_preset.pack(side='left')
-        ttk.Button(row, text='套用', command=self._apply_preset).pack(side='left', padx=6)
-        ttk.Button(row, text='重新載入', command=self._fill_presets).pack(side='left')
+        ttk.Button(row, text='Apply', command=self._apply_preset).pack(side='left', padx=6)
+        ttk.Button(row, text='Reload', command=self._fill_presets).pack(side='left')
         self._fill_presets()
 
-        f = ttk.LabelFrame(parent, text=' 賭場規則 ', padding=8)
+        f = ttk.LabelFrame(parent, text=' Casino Rules ', padding=8)
         f.pack(fill='x')
         r = 0
-        self._row(f, r, '牌副數')
+        self._row(f, r, 'Number of decks')
         ttk.Spinbox(f, from_=DECK_MIN, to=DECK_MAX, width=8,
                     textvariable=self.decks).grid(row=r, column=1, sticky='w')
         r += 1
@@ -234,66 +254,68 @@ class App:
                                   textvariable=self.pen)
         self.sp_pen.grid(row=r, column=1, sticky='w')
         r += 1
-        self.cb_csm = ttk.Checkbutton(f, text='連續洗牌機 (CSM)：每手都重洗，沒有切牌點',
+        self.cb_csm = ttk.Checkbutton(f, text='Continuous shuffling machine (CSM): reshuffles every hand, no cut card',
                                       variable=self.csm)
         self.cb_csm.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self._row(f, r, '莊家軟 17')
+        self._row(f, r, 'Dealer soft 17')
         box = ttk.Frame(f); box.grid(row=r, column=1, sticky='w')
-        ttk.Radiobutton(box, text='S17 停', variable=self.h17, value=False).pack(side='left')
-        ttk.Radiobutton(box, text='H17 補', variable=self.h17, value=True).pack(side='left')
+        ttk.Radiobutton(box, text='S17 (stand)', variable=self.h17, value=False).pack(side='left')
+        ttk.Radiobutton(box, text='H17 (hit)', variable=self.h17, value=True).pack(side='left')
         r += 1
-        self._row(f, r, '加倍時機')
+        self._row(f, r, 'When doubling is allowed')
         self.cb_double = ttk.Combobox(f, width=14, state='readonly',
-                                      values=['任兩張', '只有 9/10/11', '只有 10/11'])
+                                      values=['Any two cards', 'Only 9/10/11', 'Only 10/11'])
         self.cb_double.current(0)
         self.cb_double.bind('<<ComboboxSelected>>', self._on_double)
         self.cb_double.grid(row=r, column=1, sticky='w')
         r += 1
-        ttk.Checkbutton(f, text='分牌後可加倍 (DAS)', variable=self.das
+        ttk.Checkbutton(f, text='Double after split (DAS)', variable=self.das
                         ).grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        # peek 排在投降前面：peek 開著的話 early surrender 這個選項根本不存在
-        # （BJ 在玩家動作前就結算完了），要先知道 peek 開關才看得懂投降下拉
-        # 選單裡為什麼有時候只有兩個選項、有時候有三個。
-        self.cb_peek = ttk.Checkbutton(f, text='莊家發底牌並偷看 (peek)', variable=self.peek)
+        # peek is placed before surrender: with peek on, early surrender
+        # isn't even an option (BJ is already settled before the player
+        # acts) -- the peek toggle needs to be understood first, or the
+        # surrender dropdown's varying number of options (two vs. three)
+        # won't make sense.
+        self.cb_peek = ttk.Checkbutton(f, text='Dealer deals and checks the hole card (peek)', variable=self.peek)
         self.cb_peek.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self.cb_obo = ttk.Checkbutton(f, text='莊家 BJ 時玩家只輸原始注 (OBO)',
+        self.cb_obo = ttk.Checkbutton(f, text='Player only loses the original bet on dealer BJ (OBO)',
                                       variable=self.obo)
         self.cb_obo.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self._row(f, r, '投降')
+        self._row(f, r, 'Surrender')
         self.cb_sur = ttk.Combobox(f, width=14, state='readonly',
-                                   values=['不可投降', 'late surrender', 'early surrender'])
+                                   values=['No surrender', 'Late surrender', 'Early surrender'])
         self.cb_sur.current(1)
         self.cb_sur.bind('<<ComboboxSelected>>', self._on_sur)
         self.cb_sur.grid(row=r, column=1, sticky='w')
         r += 1
-        self.cb_sur_ace = ttk.Checkbutton(f, text='莊家明牌 A 也可以投降',
+        self.cb_sur_ace = ttk.Checkbutton(f, text='Surrender also allowed vs. dealer ace',
                                           variable=self.sur_vs_ace)
         self.cb_sur_ace.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self.cb_rsa = ttk.Checkbutton(f, text='可以再分 A (RSA)', variable=self.rsa)
+        self.cb_rsa = ttk.Checkbutton(f, text='Resplit aces allowed (RSA)', variable=self.rsa)
         self.cb_rsa.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self.cb_hsa = ttk.Checkbutton(f, text='分 A 之後還能補牌', variable=self.hsa)
+        self.cb_hsa = ttk.Checkbutton(f, text='Can hit after splitting aces', variable=self.hsa)
         self.cb_hsa.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        ttk.Checkbutton(f, text='BJ 只賠 6:5（否則 3:2）', variable=self.bj65
+        ttk.Checkbutton(f, text='BJ pays only 6:5 (otherwise 3:2)', variable=self.bj65
                         ).grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
         self.lock_note = ttk.Label(f, text='', foreground='#b45309', wraplength=250,
                                    justify='left')
         self.lock_note.grid(row=r, column=0, columnspan=2, sticky='w', pady=(6, 0))
-        ttk.Label(f, text='分牌上限固定 4 手', foreground='#64748b'
+        ttk.Label(f, text='Split cap is fixed at 4 hands', foreground='#64748b'
                   ).grid(row=r + 1, column=0, columnspan=2, sticky='w')
 
     def _build_sim(self, parent):
-        f = ttk.LabelFrame(parent, text=' 模擬設定 ', padding=8)
+        f = ttk.LabelFrame(parent, text=' Simulation Settings ', padding=8)
         f.pack(fill='x', pady=(8, 0))
         r = 0
-        self._row(f, r, '每次模擬手數')
+        self._row(f, r, 'Hands per run')
         ttk.Entry(f, textvariable=self.hands, width=14).grid(row=r, column=1, sticky='w')
         r += 1
         box = ttk.Frame(f); box.grid(row=r, column=0, columnspan=2, sticky='w', pady=(0, 4))
@@ -304,64 +326,65 @@ class App:
         ttk.Label(f, textvariable=self.precision, foreground='#0369a1',
                   wraplength=250, justify='left').grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        for text, var, kw in (('獨立實驗次數', self.sessions, dict(from_=1, to=64)),
-                              ('基本注碼', self.bet, dict(from_=1, to=1000)),
-                              ('本金（單位）', self.bankroll, dict(from_=10, to=100000, increment=50)),
-                              ('平行核心數', self.jobs, dict(from_=1, to=64))):
+        for text, var, kw in (('Independent runs', self.sessions, dict(from_=1, to=64)),
+                              ('Base bet', self.bet, dict(from_=1, to=1000)),
+                              ('Bankroll (units)', self.bankroll, dict(from_=10, to=100000, increment=50)),
+                              ('Parallel cores', self.jobs, dict(from_=1, to=64))):
             self._row(f, r, text)
             ttk.Spinbox(f, width=12, textvariable=var, **kw).grid(row=r, column=1, sticky='w')
             r += 1
-        self._row(f, r, '亂數種子')
+        self._row(f, r, 'Random seed')
         self.sp_seed = ttk.Spinbox(f, width=12, textvariable=self.seed,
                                    from_=0, to=10 ** 9, state='disabled')
         self.sp_seed.grid(row=r, column=1, sticky='w')
         r += 1
         self.cb_fixed_seed = ttk.Checkbutton(
-            f, text='固定種子（可重現同一次結果）', variable=self.fixed_seed,
+            f, text='Fixed seed (reproduce the same result)', variable=self.fixed_seed,
             command=self._sync_seed_lock)
         self.cb_fixed_seed.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        ttk.Label(f, text='預設每次「開始模擬」都會換一個新種子，\n'
-                          '結果自然每次不同；固定種子會一直重複同一批牌。',
+        ttk.Label(f, text='By default a new seed is drawn every time you click\n'
+                          '"start simulation," so results differ each run; a fixed\n'
+                          'seed replays the same shoe every time.',
                   foreground='#64748b', justify='left'
                   ).grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
 
     def _build_strategy(self, parent):
-        f2 = ttk.LabelFrame(parent, text=' 策略（來自 strategies/*.json） ', padding=8)
+        f2 = ttk.LabelFrame(parent, text=' Strategies (from strategies/*.json) ', padding=8)
         f2.pack(fill='x')
         self.strat_box = ttk.Frame(f2)
         self.strat_box.pack(fill='x')
         self._fill_strategies()
         bar = ttk.Frame(f2)
         bar.pack(fill='x', pady=(4, 0))
-        ttk.Button(bar, text='重新載入策略檔', command=self._reload_strategies
+        ttk.Button(bar, text='Reload strategy files', command=self._reload_strategies
                    ).pack(side='left')
-        ttk.Label(bar, text='  ⊛ = 算牌', foreground='#64748b').pack(side='left')
+        ttk.Label(bar, text='  * = card counting', foreground='#64748b').pack(side='left')
         ttk.Separator(f2, orient='horizontal').pack(fill='x', pady=5)
-        ttk.Checkbutton(f2, text='策略表隨規則自動調整', variable=self.adaptive).pack(anchor='w')
-        ttk.Label(f2, text='取消勾選＝忽略策略檔裡的 overrides，\n可看出用錯策略表的代價',
+        ttk.Checkbutton(f2, text='Strategy table adapts automatically to the rules', variable=self.adaptive).pack(anchor='w')
+        ttk.Label(f2, text='Unchecked = ignore the overrides in the strategy file,\nto see the cost of using the wrong strategy table',
                   foreground='#64748b', justify='left').pack(anchor='w')
 
-        f3 = ttk.LabelFrame(parent, text=' 規則對比 ', padding=8)
+        f3 = ttk.LabelFrame(parent, text=' Rule Comparison ', padding=8)
         f3.pack(fill='x', pady=(8, 0))
         self.cb_sweep = ttk.Combobox(f3, width=28, state='readonly',
                                      values=[n for n, _ in SWEEP_LABELS])
         self.cb_sweep.current(0)
         self.cb_sweep.bind('<<ComboboxSelected>>', self._on_sweep)
         self.cb_sweep.pack(anchor='w')
-        ttk.Label(f3, text='選了就用同一組牌靴掃描該維度\n（共用亂數，差異更容易分辨）',
+        ttk.Label(f3, text='When selected, sweeps that dimension using the same shoe\n(Common Random Numbers, making differences easier to resolve)',
                   foreground='#64748b', justify='left').pack(anchor='w')
 
     def _build_run(self, parent):
         f = ttk.Frame(parent, padding=(0, 10))
         f.pack(fill='x')
-        self.btn_run = ttk.Button(f, text='開始模擬', command=self._start)
+        self.btn_run = ttk.Button(f, text='Start Simulation', command=self._start)
         self.btn_run.pack(side='left')
-        self.btn_cancel = ttk.Button(f, text='取消', command=self._request_cancel,
+        self.btn_cancel = ttk.Button(f, text='Cancel', command=self._request_cancel,
                                      state='disabled')
         self.btn_cancel.pack(side='left', padx=6)
-        self.btn_save = ttk.Button(f, text='匯出圖表', command=self._export,
+        self.btn_save = ttk.Button(f, text='Export Charts', command=self._export,
                                    state='disabled')
         self.btn_save.pack(side='left')
         self.pbar = ttk.Progressbar(parent, mode='determinate', maximum=1000)
@@ -373,30 +396,30 @@ class App:
         self.nb = ttk.Notebook(parent)
         self.nb.pack(fill='both', expand=True)
         self.txt = tk.Text(self.nb, wrap='none', font=('Menlo', 11), padx=10, pady=10)
-        self.nb.add(self.txt, text='摘要')
-        for key, title in (('bankroll', '資金曲線'), ('dist', '結果分布'), ('cmp', '對比圖')):
+        self.nb.add(self.txt, text='Summary')
+        for key, title in (('bankroll', 'Bankroll Curves'), ('dist', 'Result Distribution'), ('cmp', 'Comparison')):
             frame = ttk.Frame(self.nb)
             self.nb.add(frame, text=title)
             self.canvases[key] = {'frame': frame, 'canvas': None, 'toolbar': None,
                                   'fig': None, 'job_id': None}
-        self._build_strategy_view(self._add_tab('策略表'))
-        self._build_scenario_view(self._add_tab('情境試算'))
+        self._build_strategy_view(self._add_tab('Strategy Table'))
+        self._build_scenario_view(self._add_tab('Scenario Tester'))
 
     def _add_tab(self, title):
         frame = ttk.Frame(self.nb)
         self.nb.add(frame, text=title)
         return frame
 
-    # -------------------------------------------------------- 策略表檢視器
+    # -------------------------------------------------------- strategy table viewer
     def _build_strategy_view(self, parent):
         bar = ttk.Frame(parent, padding=6)
         bar.pack(fill='x')
-        ttk.Label(bar, text='策略：').pack(side='left')
+        ttk.Label(bar, text='Strategy:').pack(side='left')
         self.cb_view_strategy = ttk.Combobox(bar, width=24, state='readonly')
         self.cb_view_strategy.pack(side='left', padx=(0, 8))
         self.cb_view_strategy.bind('<<ComboboxSelected>>',
                                    lambda e: self._render_strategy_tables())
-        ttk.Button(bar, text='重新整理（套用目前規則）',
+        ttk.Button(bar, text='Refresh (apply current rules)',
                    command=self._render_strategy_tables).pack(side='left')
         self.strategy_view_note = ttk.Label(bar, text='', foreground='#64748b',
                                             wraplength=520, justify='left')
@@ -404,8 +427,8 @@ class App:
 
         legend = ttk.Frame(parent, padding=(6, 0, 6, 4))
         legend.pack(fill='x')
-        for label, name in (('H', '補牌'), ('S', '停牌'), ('D', '加倍'),
-                            ('P', '分牌'), ('Rh', '投降'), ('N', '不分/往下查')):
+        for label, name in (('H', 'Hit'), ('S', 'Stand'), ('D', 'Double'),
+                            ('P', 'Split'), ('Rh', 'Surrender'), ('N', "Don't split / fall through")):
             tk.Label(legend, text='  ', bg=CELL_COLORS[label], relief='solid', bd=1
                      ).pack(side='left', padx=(0, 3))
             ttk.Label(legend, text=name).pack(side='left', padx=(0, 12))
@@ -415,13 +438,16 @@ class App:
         self.strategy_view_holder = holder
 
     def _make_tk_scrollable(self, parent):
-        """用純 tk（不是 ttk）元件做垂直捲動區域。
+        """Build a vertically scrollable area using pure tk (not ttk) widgets.
 
-        macOS Aqua 主題下把 ttk 控制項塞進 tk.Canvas 會整個畫不出來——
-        widget 的座標/大小量起來都正常，畫面上就是不會被畫出來（ttk 在
-        macOS 走原生繪製，跟 Canvas 的合成流程對不上，之前在左側規則欄
-        踩過這個坑）。純 tk 元件走 Tk 自己的跨平台繪製，沒有這個問題，
-        這裡的策略表格子刻意全部用 tk.Frame/tk.Label，不要用 ttk 版本。
+        Under macOS's Aqua theme, ttk widgets embedded in a tk.Canvas
+        don't render at all -- their coordinates/sizes measure correctly,
+        but nothing appears on screen (ttk renders natively on macOS,
+        which doesn't mesh with Canvas's compositing pipeline; ran into
+        this same issue earlier with the left rules column). Pure tk
+        widgets use Tk's own cross-platform rendering and don't have this
+        problem, so the strategy table cells here are deliberately all
+        tk.Frame/tk.Label, not the ttk equivalents.
         """
         wrap = ttk.Frame(parent)
         canvas = tk.Canvas(wrap, highlightthickness=0, bg='white')
@@ -457,18 +483,22 @@ class App:
 
     @staticmethod
     def _col_to_up(col):
-        """格子欄位索引 0..9（對應 2..10,A）換算成實際的莊家明牌點數。"""
+        """Convert a cell's column index 0..9 (mapping to 2..10,A) into the
+        actual dealer upcard value."""
         return 1 if col == 9 else col + 2
 
     def _draw_total_grid(self, holder, title, table, totals, rules, is_soft, strat):
-        """totals 由小到大畫（小總點數在上、大總點數在下）。
+        """totals are drawn from low to high (smaller totals on top, larger below).
 
-        is_soft 決定怎麼把顯示總點數換算回 rules.double_allowed_on() 要的
-        「不算軟手加值的原始點數和」——軟 18(A,7) 顯示 18，換算回去是 8。
+        is_soft determines how the displayed total is converted back to
+        the "raw total without the soft-ace bonus" that
+        rules.double_allowed_on() needs -- soft 18 (A,7) displays as 18,
+        which converts back to 8.
 
-        strat 傳給 effective_cell_label() 是為了讓 SURRENDER_EARLY 模式下
-        的顯示跟真正的牌局行為一致（early_surrender() 的 es_vs_ace/es_vs_ten
-        前置檢查會蓋過 hard 表本身，見 core/strategy.py 的說明）。
+        strat is passed to effective_cell_label() so the display matches
+        real gameplay under SURRENDER_EARLY (early_surrender()'s
+        es_vs_ace/es_vs_ten pre-check overrides the hard table itself --
+        see core/strategy.py for details).
         """
         tk.Label(holder, text=title, bg='white', fg='black', font=('Menlo', 11, 'bold')
                  ).pack(anchor='w', padx=8, pady=(10, 2))
@@ -496,8 +526,8 @@ class App:
         pair_names = ('A', '2', '3', '4', '5', '6', '7', '8', '9', '10')
         for r, (key, name) in enumerate(zip(range(1, 11), pair_names), start=1):
             row = table.get(key)
-            hard_total = 2 * key           # A,A 的原始點數和是 1+1=2
-            is_soft = key == 1             # 只有 A,A 算軟手（不分牌就是軟 12）
+            hard_total = 2 * key           # A,A's raw total is 1+1=2
+            is_soft = key == 1             # only A,A counts as soft (a soft 12 if not split)
             tk.Label(grid, text=f'{name},{name}', bg='white', fg='black', width=5,
                      font=('Menlo', 10, 'bold')
                      ).grid(row=r, column=0, sticky='e', padx=(0, 4))
@@ -508,11 +538,11 @@ class App:
                 self._cell_widget(grid, label, r, c + 1)
 
     def _draw_deviation_list(self, holder, strat):
-        tk.Label(holder, text='算牌偏離（依真數／流水數變化的格子）', bg='white',
+        tk.Label(holder, text='Counting deviations (cells that change with true/running count)', bg='white',
                  fg='black', font=('Menlo', 11, 'bold')
                  ).pack(anchor='w', padx=8, pady=(10, 2))
         if not strat.deviations:
-            tk.Label(holder, text='（這個策略沒有定義偏離）', bg='white', fg='#64748b'
+            tk.Label(holder, text='(this strategy defines no deviations)', bg='white', fg='#64748b'
                      ).pack(anchor='w', padx=8, pady=(0, 12))
             return
         for (tname, row, col), rule_list in sorted(strat.deviations.items()):
@@ -521,13 +551,13 @@ class App:
             for lo, hi, cell in rule_list:
                 act = strategy_mod.cell_label(cell)
                 if hi == float('inf'):
-                    cond = f"計數 >= {lo:g}"
+                    cond = f"count >= {lo:g}"
                 elif lo == float('-inf'):
-                    cond = f"計數 <= {hi:g}"
+                    cond = f"count <= {hi:g}"
                 else:
-                    cond = f"{lo:g} <= 計數 <= {hi:g}"
+                    cond = f"{lo:g} <= count <= {hi:g}"
                 tk.Label(holder, bg='white', fg='black', anchor='w', justify='left',
-                         text=f"  {tname} {row_label} 對 {dealer}：{cond} 時改成 {act}",
+                         text=f"  {tname} {row_label} vs. {dealer}: becomes {act} when {cond}",
                          font=('Menlo', 10)).pack(anchor='w', padx=16)
         tk.Label(holder, text='', bg='white').pack(pady=4)
 
@@ -542,63 +572,63 @@ class App:
         try:
             strat = strategy_mod.make(code, rules)
         except Exception as e:
-            tk.Label(self.strategy_view_holder, text=f'載入失敗：{e}', bg='white',
+            tk.Label(self.strategy_view_holder, text=f'Load failed: {e}', bg='white',
                      fg='#dc2626').pack(anchor='w', padx=8, pady=8)
             return
         note = rules.label()
         if strat.applied_overrides:
-            note += '｜套用了：' + '；'.join(strat.applied_overrides)
+            note += ' | applied: ' + '; '.join(strat.applied_overrides)
         self.strategy_view_note.configure(text=note)
 
-        self._draw_total_grid(self.strategy_view_holder, '硬牌 Hard Totals',
+        self._draw_total_grid(self.strategy_view_holder, 'Hard Totals',
                               strat.hard, range(4, 21), rules, is_soft=False, strat=strat)
-        self._draw_total_grid(self.strategy_view_holder, '軟牌 Soft Totals',
+        self._draw_total_grid(self.strategy_view_holder, 'Soft Totals',
                               strat.soft, range(12, 21), rules, is_soft=True, strat=strat)
-        self._draw_pair_grid(self.strategy_view_holder, '對子 Pairs', strat.pair, rules, strat)
+        self._draw_pair_grid(self.strategy_view_holder, 'Pairs', strat.pair, rules, strat)
         if strat.count_tags:
             self._draw_deviation_list(self.strategy_view_holder, strat)
 
-    # -------------------------------------------------------- 情境試算
+    # -------------------------------------------------------- scenario tester
     def _build_scenario_view(self, parent):
         bar = ttk.Frame(parent, padding=8)
         bar.pack(fill='x')
 
-        ttk.Label(bar, text='玩家第一張').grid(row=0, column=0, sticky='w')
+        ttk.Label(bar, text="Player's first card").grid(row=0, column=0, sticky='w')
         self.cb_p1 = ttk.Combobox(bar, width=5, state='readonly', values=CARD_VALUES)
-        self.cb_p1.current(6)             # 預設 8
+        self.cb_p1.current(6)             # default: 8
         self.cb_p1.grid(row=0, column=1, padx=(2, 12))
 
-        ttk.Label(bar, text='玩家第二張').grid(row=0, column=2, sticky='w')
+        ttk.Label(bar, text="Player's second card").grid(row=0, column=2, sticky='w')
         self.cb_p2 = ttk.Combobox(bar, width=5, state='readonly', values=CARD_VALUES)
-        self.cb_p2.current(6)             # 預設 8（8,8 是最常拿來討論的分牌情境）
+        self.cb_p2.current(6)             # default: 8 (8,8 is the most commonly discussed split scenario)
         self.cb_p2.grid(row=0, column=3, padx=(2, 12))
 
-        ttk.Label(bar, text='莊家明牌').grid(row=0, column=4, sticky='w')
+        ttk.Label(bar, text="Dealer's upcard").grid(row=0, column=4, sticky='w')
         self.cb_dup = ttk.Combobox(bar, width=5, state='readonly', values=CARD_VALUES)
-        self.cb_dup.current(8)            # 預設 10
+        self.cb_dup.current(8)            # default: 10
         self.cb_dup.grid(row=0, column=5, padx=(2, 12))
 
-        ttk.Label(bar, text='每個動作模擬手數').grid(row=1, column=0, sticky='w', pady=(8, 0))
+        ttk.Label(bar, text='Hands per action').grid(row=1, column=0, sticky='w', pady=(8, 0))
         self.scen_hands = tk.StringVar(value='1000000')
         ttk.Entry(bar, textvariable=self.scen_hands, width=12
                   ).grid(row=1, column=1, columnspan=2, sticky='w', pady=(8, 0))
 
-        ttk.Label(bar, text='延續策略').grid(row=1, column=3, sticky='w', pady=(8, 0))
+        ttk.Label(bar, text='Follow-up strategy').grid(row=1, column=3, sticky='w', pady=(8, 0))
         self.cb_scen_strategy = ttk.Combobox(bar, width=16, state='readonly')
         self.cb_scen_strategy.grid(row=1, column=4, columnspan=2, sticky='w', pady=(8, 0))
-        ttk.Label(bar, text='（第一步之後照這個策略打）', foreground='#64748b'
+        ttk.Label(bar, text='(played per this strategy after the first move)', foreground='#64748b'
                   ).grid(row=1, column=6, sticky='w', pady=(8, 0), padx=(6, 0))
 
         run_row = ttk.Frame(parent, padding=(8, 0, 8, 8))
         run_row.pack(fill='x')
-        self.btn_scen_run = ttk.Button(run_row, text='計算', command=self._start_scenario)
+        self.btn_scen_run = ttk.Button(run_row, text='Compute', command=self._start_scenario)
         self.btn_scen_run.pack(side='left')
-        self.btn_scen_cancel = ttk.Button(run_row, text='取消', command=self._cancel_scenario,
+        self.btn_scen_cancel = ttk.Button(run_row, text='Cancel', command=self._cancel_scenario,
                                           state='disabled')
         self.btn_scen_cancel.pack(side='left', padx=6)
         self.scen_pbar = ttk.Progressbar(run_row, mode='determinate', maximum=1000, length=220)
         self.scen_pbar.pack(side='left', padx=6)
-        self.scen_status = tk.StringVar(value='就緒')
+        self.scen_status = tk.StringVar(value='Ready')
         ttk.Label(run_row, textvariable=self.scen_status, foreground='#334155'
                   ).pack(side='left', padx=6)
 
@@ -626,12 +656,12 @@ class App:
             c2 = scenario_mod.parse_card(self.cb_p2.get())
             up = scenario_mod.parse_card(self.cb_dup.get())
         except scenario_mod.ScenarioError as e:
-            messagebox.showerror('輸入錯誤', str(e))
+            messagebox.showerror('Input Error', str(e))
             return
         try:
             hands = int(float(self.scen_hands.get()))
         except ValueError:
-            messagebox.showerror('輸入錯誤', '模擬手數要是數字')
+            messagebox.showerror('Input Error', 'Hands must be a number')
             return
         rules, _notes = self._collect()
         strat_label = self.cb_scen_strategy.get()
@@ -639,15 +669,17 @@ class App:
 
         legal = scenario_mod.legal_first_actions((c1, c2), up, rules)
         if legal == 0:
-            messagebox.showerror('輸入錯誤', '這個起手在目前規則下沒有合法動作可比較')
+            messagebox.showerror('Input Error', 'This opening has no legal actions to compare under the current rules')
             return
 
         try:
             strat = strategy_mod.make(strat_code, rules)
             hand = Hand([c1, c2], 1.0)
-            # decide() 不知道 early surrender：那是 core.engine.play_round
-            # 裡「decide() 之前」的獨立前置檢查（early_surrender()），這裡要
-            # 照同樣的順序判斷，不然 SURRENDER_EARLY 桌會顯示成沒投降的動作。
+            # decide() doesn't know about early surrender: that's a
+            # separate pre-check (early_surrender()) run "before decide()"
+            # in core.engine.play_round -- this has to follow the same
+            # order, or a SURRENDER_EARLY table would display an action
+            # that isn't actually a surrender.
             player_bj = len(hand.cards) == 2 and hand.total == 21
             if (rules.surrender == SURRENDER_EARLY and not player_bj
                     and rules.surrender_allowed_vs(up)
@@ -659,15 +691,19 @@ class App:
         except Exception:
             self._scen_table_action = None
 
-        # 記下這次測的是哪一格，結果出來才知道「更新策略表」按鈕要改哪個
-        # 檔案的哪個位置；同時檢查目前這格是不是被某個 override 蓋過
-        # （例如 H17 差異格）——如果是，更新基礎表不會真的生效，要先講清楚。
+        # remember which cell this run corresponds to, so once results are
+        # in, the "update strategy table" button knows which file/position
+        # to edit; also check whether this cell is currently overridden by
+        # something (e.g. an H17 difference cell) -- if so, updating the
+        # base table won't actually take effect, and that needs to be
+        # flagged up front.
         self._scen_cell = self._resolve_scenario_cell(c1, c2, up, strat_code, rules)
 
-        # 跟主流程共用同一個「固定種子」開關：沒勾的話這裡也要每次重新抽
-        # 一個種子，不然每次按「計算」都是同一個種子、同一副牌，結果會
-        # 一模一樣，容易被誤會成「這格答案很穩定」，其實只是沒有真的
-        # 重新抽樣。
+        # shares the same "fixed seed" toggle as the main flow: if
+        # unchecked, a fresh seed needs to be drawn here too, or every
+        # "compute" click would reuse the same seed and shoe, producing
+        # identical results every time -- easy to mistake for "this cell's
+        # answer is very stable" when it's really just not resampling at all.
         if not self.fixed_seed.get():
             self.seed.set(random.randrange(1, 2 ** 31 - 1))
         actual_seed = int(self.seed.get())
@@ -679,7 +715,7 @@ class App:
         self.btn_scen_run.state(['disabled'])
         self.btn_scen_cancel.state(['!disabled'])
         self.scen_pbar['value'] = 0
-        self.scen_status.set('計算中…')
+        self.scen_status.set('Computing...')
 
         args = dict(rules=rules, strat_code=strat_code, cards=(c1, c2), up=up,
                     hands=hands, jobs=int(self.jobs.get()), seed=actual_seed)
@@ -690,10 +726,12 @@ class App:
 
     @staticmethod
     def _resolve_scenario_cell(c1, c2, up, strat_code, rules):
-        """算出這次情境對應策略表的哪一格（kind/row/col），順便檢查這格
-        目前是不是被某個 override 蓋過（H17 差異格之類的）。
+        """Work out which strategy table cell (kind/row/col) this scenario
+        corresponds to, and check whether it's currently overridden by
+        something (an H17 difference cell, etc.).
 
-        回傳 dict 或 None（策略載入失敗、或這格根本查不到表時）。
+        Returns a dict, or None (strategy load failed, or the cell simply
+        isn't in the table at all).
         """
         try:
             is_pair = c1 == c2
@@ -718,19 +756,25 @@ class App:
             return None
 
     def _show_solver_reference(self, c1, c2, up, rules, seed):
-        """先顯示無限牌組的精確解（瞬間算完，不含分牌）當快速參考，
-        蒙地卡羅（含分牌、用實際副數）跑完會接在後面。"""
-        lines = [f'玩家 {self._card_name(c1)},{self._card_name(c2)} 對莊家 '
-                f'{self._card_name(up)}　({rules.label()})',
-                f'亂數種子：{seed}' + ('（固定）' if self.fixed_seed.get() else '（本次自動產生，未固定）'),
+        """Show the infinite-deck exact solution first (computed instantly,
+        splits excluded) as a quick reference; the Monte Carlo result
+        (includes splits, uses the actual deck count) is appended once it
+        finishes."""
+        lines = [f'Player {self._card_name(c1)},{self._card_name(c2)} vs. dealer '
+                f'{self._card_name(up)}   ({rules.label()})',
+                f'Random seed: {seed}' + (' (fixed)' if self.fixed_seed.get() else ' (auto-generated this run, not fixed)'),
                 '']
-        # 明確標出「策略表現在建議什麼」，不然使用者很容易誤把下面的「精確解」
-        # 當成策略表的答案——精確解是每次都獨立算出來的數學結果，完全不查
-        # 任何 JSON，改了策略檔也不會變；只有這一行才是真的在讀策略檔，
-        # 按過「更新策略表」之後重新計算，這一行才會變。
+        # explicitly call out "what the strategy table currently
+        # recommends," or users can easily mistake the "exact solution"
+        # below for the strategy table's answer -- the exact solution is
+        # an independently computed mathematical result every time,
+        # consulting no JSON at all, and won't change if the strategy file
+        # is edited; only this line actually reads the strategy file, and
+        # only updates after "update strategy table" is pressed and this
+        # is recomputed.
         table_name = getattr(self, '_scen_table_action', None)
-        lines.append(f'目前策略表（{self.cb_scen_strategy.get()}）建議：'
-                     + (table_name if table_name else '（無法判斷）'))
+        lines.append(f'The current strategy table ({self.cb_scen_strategy.get()}) recommends: '
+                     + (table_name if table_name else '(unable to determine)'))
         lines.append('')
 
         is_pair = c1 == c2
@@ -742,24 +786,30 @@ class App:
             col = 9 if up == 1 else up - 2
             solved = solver_solve(rules)
             letter, evs = solved[kind][total][col]
-            lines.append('精確解（無限牌組、不含分牌，瞬間算出、零誤差；'
-                         '\n跟上面的策略表無關——這裡不查任何 JSON，是每次重新用數學算出來的，'
-                         '\n改策略檔不會讓這段跟著變，它本來就不是從策略檔查來的）：')
+            lines.append('Exact solution (infinite deck, splits excluded, computed instantly, zero error;'
+                         '\nunrelated to the strategy table above -- this consults no JSON at all, it\'s'
+                         '\nrecomputed mathematically every time, and won\'t change if the strategy file'
+                         '\ndoes, since it was never derived from the strategy file to begin with):')
             for k in sorted(evs, key=evs.get, reverse=True):
-                tag = '  ← 精確解最佳（未比較分牌）' if k == letter else ''
+                tag = '  <- exact-solution best (splits not compared)' if k == letter else ''
                 lines.append(f'  {k:<3} EV = {evs[k]:+.5f}{tag}')
             if is_pair:
-                lines.append('  （這手是對子，精確解不含分牌選項——分牌牽扯 DAS/RSA/再分牌，'
-                             '\n   精確解代價太高，分牌只能靠下面的蒙地卡羅比較）')
+                lines.append('  (this hand is a pair, and the exact solution has no split option --'
+                             '\n   splits bring in DAS/RSA/resplitting complexity that makes an exact'
+                             '\n   solution too expensive, so splits can only be compared via the Monte'
+                             '\n   Carlo below)')
             lines.append('')
-            lines.append('這張精確解假設無限副牌，真實副數少時邊際格子答案可能不同'
-                         '\n（實測過 A,2 對 5 這種例子），下面的蒙地卡羅用的是你設定的實際副數，'
-                         '\n而且會跟上面「策略表建議」那一行比較（不是跟精確解比較）：')
+            lines.append('This exact solution assumes an infinite deck; marginal cells can have a'
+                         '\ndifferent answer at your real (smaller) deck count (measured, e.g., for A,2'
+                         '\nvs. 5). The Monte Carlo below uses your actual configured deck count, and'
+                         '\nwill be compared against the "strategy table recommends" line above'
+                         '\n(not against the exact solution):')
             lines.append('')
         except Exception as e:
-            lines.append(f'（精確解計算失敗：{e}）')
-        # 「計算中…」的進度已經有 self.scen_status 那個 StringVar 顯示了，
-        # 這裡不用重複塞一行，不然結果跑完後會跟下面的蒙地卡羅結果黏在一起。
+            lines.append(f'(exact solution computation failed: {e})')
+        # progress is already shown via the self.scen_status StringVar as
+        # "Computing...", no need to repeat that here, or it would run
+        # together with the Monte Carlo results once they land.
         self.scen_result_text.delete('1.0', 'end')
         self.scen_result_text.insert('end', '\n'.join(lines))
 
@@ -782,7 +832,7 @@ class App:
 
     def _cancel_scenario(self):
         self.scen_cancel.set()
-        self.scen_status.set('取消中…')
+        self.scen_status.set('Cancelling...')
 
     def _poll_scenario(self):
         alive = bool(self.scen_worker and self.scen_worker.is_alive())
@@ -808,11 +858,11 @@ class App:
                     self._finish_scenario(msg[1])
                     return True
                 elif kind == 'cancelled':
-                    self.scen_status.set('已取消')
+                    self.scen_status.set('Cancelled')
                     self._scenario_idle()
                     return True
                 elif kind == 'error':
-                    self.scen_status.set('發生錯誤')
+                    self.scen_status.set('Error')
                     self.scen_result_text.insert('end', '\n' + msg[1])
                     self._scenario_idle()
                     return True
@@ -824,54 +874,59 @@ class App:
         self.btn_scen_cancel.state(['disabled'])
 
     def _finish_scenario(self, results):
-        self.scen_status.set('完成')
+        self.scen_status.set('Done')
         self._scenario_idle()
-        lines = ['蒙地卡羅（含分牌、用實際副數）— 由好到壞：', '']
+        lines = ['Monte Carlo (splits included, actual deck count) -- best to worst:', '']
         best = results[0]
         for act, name, ev, ci, sd in results:
-            tag = '  ← 最佳' if (act, name) == (best[0], best[1]) else ''
-            lines.append(f'  {name:<10} EV = {ev:+.5f} ± {ci:.5f}   SD={sd:.3f}{tag}')
+            tag = '  <- best' if (act, name) == (best[0], best[1]) else ''
+            lines.append(f'  {name:<10} EV = {ev:+.5f} +/- {ci:.5f}   SD={sd:.3f}{tag}')
 
-        # 「跑出來的結論」跟「策略表現在建議的動作」不一樣，不代表策略表錯了——
-        # 蒙地卡羅有抽樣誤差，差距要超過兩邊信賴區間合起來的範圍才算真的顯著，
-        # 不然常常只是雜訊，加大手數才知道是不是真的。
+        # "what the simulation concluded" differing from "what the
+        # strategy table currently recommends" doesn't necessarily mean
+        # the table is wrong -- Monte Carlo carries sampling error, and
+        # the gap needs to exceed both sides' combined confidence
+        # intervals to count as genuinely significant; otherwise it's
+        # often just noise, and more hands are needed to tell.
         table_name = getattr(self, '_scen_table_action', None)
         lines.append('')
         if table_name is None:
-            lines.append('（無法判斷策略表現在建議哪個動作，略過比較）')
+            lines.append('(unable to determine what the strategy table currently recommends, skipping comparison)')
         elif table_name == best[1]:
-            lines.append(f'跟策略表一致：目前建議的「{table_name}」正是蒙地卡羅測出的最佳動作。')
+            lines.append(f'Matches the strategy table: the current recommendation of "{table_name}" is exactly what Monte Carlo found best.')
         else:
             table_row = next((r for r in results if r[1] == table_name), None)
             if table_row is None:
-                lines.append(f'策略表建議「{table_name}」，但那個動作在這個起手不合法'
-                             '（表格本身可能沒套用目前的規則限制）。')
+                lines.append(f'The strategy table recommends "{table_name}," but that action isn\'t legal for this opening'
+                             ' (the table itself may not account for the current rule restrictions).')
             else:
                 _a2, _n2, table_ev, table_ci, _sd2 = table_row
                 gap = best[2] - table_ev
                 pooled = (best[3] ** 2 + table_ci ** 2) ** 0.5
                 if gap > pooled:
-                    lines.append(f'⚠ 策略表建議「{table_name}」，但蒙地卡羅測出「{best[1]}」'
-                                 f'顯著更好：')
-                    lines.append(f'   差距 {gap:+.5f}，大於兩邊誤差合計 ±{pooled:.5f}'
-                                 '——這格可能真的該改。')
+                    lines.append(f'! The strategy table recommends "{table_name}," but Monte Carlo found "{best[1]}"'
+                                 f' significantly better:')
+                    lines.append(f'   Gap of {gap:+.5f}, larger than the combined margin of +/-{pooled:.5f}'
+                                 ' -- this cell might genuinely need to change.')
                     self.scen_result_text.insert('end', '\n'.join(lines) + '\n')
                     self._offer_table_update(results)
                     return
                 else:
-                    lines.append(f'策略表建議「{table_name}」，蒙地卡羅測出的最佳是「{best[1]}」，')
-                    lines.append(f'但差距 {gap:+.5f} 沒有超過誤差範圍 ±{pooled:.5f}——')
-                    lines.append('   目前手數還分不出來是真的更好還是抽樣雜訊，加大手數再看看。')
+                    lines.append(f'The strategy table recommends "{table_name}," and Monte Carlo found "{best[1]}" as the best,')
+                    lines.append(f'but the gap of {gap:+.5f} doesn\'t exceed the margin of +/-{pooled:.5f} --')
+                    lines.append('   not enough hands yet to tell whether it\'s a genuine improvement or sampling noise. Try more hands.')
         self.scen_result_text.insert('end', '\n'.join(lines))
 
     def _offer_table_update(self, results):
-        """顯著差異時，在結果文字後面嵌一顆按鈕，讓使用者自己決定要不要
-        把這格寫回策略檔——不自動寫，統計顯著不代表使用者一定想改
-        （可能只是想先看看，或手數還想再加大確認）。"""
+        """When the difference is significant, embed a button after the
+        result text letting the user decide whether to write this cell
+        back to the strategy file -- never automatic, since statistical
+        significance doesn't necessarily mean the user wants to change it
+        (they might just want to look first, or want more hands to confirm)."""
         cell = getattr(self, '_scen_cell', None)
         if cell is None:
             self.scen_result_text.insert(
-                'end', '（無法判斷這格對應策略表的哪個位置，略過更新選項）\n')
+                'end', '(unable to determine which strategy table position this corresponds to, skipping the update option)\n')
             return
         best_act = results[0][0]
         fallback_act = results[1][0] if len(results) > 1 else None
@@ -880,47 +935,47 @@ class App:
 
         if cell['overridden']:
             self.scen_result_text.insert(
-                'end', f"\n注意：這格目前被某個 override（例如 H17 差異格）蓋過，"
-                      f"更新 {target}.json 的基礎表不一定會改變實際結果，"
-                      "可能要另外手動改那個 override。\n\n")
+                'end', f"\nNote: this cell is currently overridden by something (e.g. an H17 difference cell), "
+                      f"so updating {target}.json's base table won't necessarily change the actual result -- "
+                      "you may need to edit that override by hand as well.\n\n")
 
         btn = ttk.Button(
-            self.scen_result_text, text=f'把這格更新成「{results[0][1]}」寫回 {target}.json',
+            self.scen_result_text, text=f'Write this cell back to {target}.json as "{results[0][1]}"',
             command=lambda: self._apply_table_update(cell, token, results[0][1]))
         self.scen_result_text.window_create('end', window=btn)
         self.scen_result_text.insert('end', '\n')
 
     def _apply_table_update(self, cell, token, action_name):
-        loc = f"{cell['kind']}[{cell['row']}] 對 {CARD_VALUES[cell['col']]}"
+        loc = f"{cell['kind']}[{cell['row']}] vs. {CARD_VALUES[cell['col']]}"
         target = strategy_mod.find_defining_file(cell['strat_code'], cell['kind'], cell['row'])
         if not messagebox.askyesno(
-                '更新策略表',
-                f'把 {target}.json 的 {loc} 改成「{action_name}」？\n\n'
-                '這會直接修改硬碟上的檔案，套用到所有繼承這份表的策略。'):
+                'Update Strategy Table',
+                f'Change {target}.json\'s {loc} to "{action_name}"?\n\n'
+                'This directly modifies the file on disk, affecting every strategy that inherits this table.'):
             return
         try:
             path = strategy_mod.write_cell(cell['strat_code'], cell['kind'], cell['row'],
                                            cell['col'], token)
         except strategy_mod.StrategyError as e:
-            messagebox.showerror('更新失敗', str(e))
+            messagebox.showerror('Update Failed', str(e))
             return
         self._reload_strategies()
         self._render_strategy_tables()
-        self.scen_result_text.insert('end', f'\n已更新 {path}，策略表已重新整理。\n')
+        self.scen_result_text.insert('end', f'\nUpdated {path}, strategy table refreshed.\n')
         self.scen_result_text.see('end')
 
-    # -------------------------------------------------------- 策略檔
+    # -------------------------------------------------------- strategy files
     def _fill_strategies(self):
         for w in self.strat_box.winfo_children():
             w.destroy()
         try:
             items = load_strategy_list()
         except Exception as e:
-            ttk.Label(self.strat_box, text=f'讀取策略檔失敗：{e}',
+            ttk.Label(self.strat_box, text=f'Failed to load strategy files: {e}',
                       foreground='#dc2626', wraplength=250).pack(anchor='w')
             return
         if not items:
-            ttk.Label(self.strat_box, text='strategies/ 底下沒有策略檔',
+            ttk.Label(self.strat_box, text='No strategy files under strategies/',
                       foreground='#dc2626').pack(anchor='w')
             return
         keep = {c: v.get() for c, v in self.strat_vars.items()}
@@ -937,17 +992,18 @@ class App:
     def _tip(widget, text):
         widget.configure(cursor='hand2')
         widget.bind('<Enter>', lambda e, t=text: widget.winfo_toplevel()
-                    .title(f'Blackjack 模擬器 — {t}'))
+                    .title(f'Blackjack Simulator -- {t}'))
         widget.bind('<Leave>', lambda e: widget.winfo_toplevel()
-                    .title('Blackjack 模擬器'))
+                    .title('Blackjack Simulator'))
 
     def _reload_strategies(self):
         self._fill_strategies()
         self._fill_strategy_dropdowns()
-        self.status.set(f'已重新載入策略檔（{len(self.strat_vars)} 個）')
+        self.status.set(f'Reloaded strategy files ({len(self.strat_vars)})')
 
     def _fill_strategy_dropdowns(self):
-        """策略表檢視器／情境試算的策略下拉選單，跟主清單共用同一份策略檔。"""
+        """The strategy table viewer / scenario tester's strategy dropdowns
+        share the same strategy files as the main list."""
         items = load_strategy_list()
         self._strategy_view_map = {label: code for label, code, _d in items}
         values = list(self._strategy_view_map)
@@ -959,7 +1015,7 @@ class App:
             elif values:
                 cb.current(0)
 
-    # ------------------------------------------------------------ 規則連動
+    # ------------------------------------------------------------ rule interactions
     def _on_double(self, _e=None):
         self.double_rule.set([DOUBLE_ANY2, DOUBLE_9_11, DOUBLE_10_11][self.cb_double.current()])
 
@@ -969,13 +1025,14 @@ class App:
     def _on_sweep(self, _e=None):
         self.sweep.set(SWEEP_LABELS[self.cb_sweep.current()][1])
 
-    # -------------------------------------------------------- 賭場預設
+    # -------------------------------------------------------- casino presets
     def _fill_presets(self):
-        """從 presets/*.json 讀出可用的賭場規則預設。改完 JSON 按「重新載入」就會更新。"""
+        """Read the available casino rule presets from presets/*.json. Edit
+        the JSON and press "reload" to pick up changes."""
         try:
             items = presets_mod.describe()
         except Exception as e:
-            messagebox.showerror('讀取預設檔失敗', str(e))
+            messagebox.showerror('Failed to Load Presets', str(e))
             return
         self._preset_map = {f'{disp}': name for name, disp, _d in items}
         cur = self.cb_preset.get()
@@ -989,17 +1046,19 @@ class App:
         label = self.cb_preset.get()
         name = self._preset_map.get(label)
         if not name:
-            messagebox.showerror('套用預設失敗', '沒有選擇預設檔')
+            messagebox.showerror('Failed to Apply Preset', 'No preset selected')
             return
         try:
             rules, _notes = presets_mod.load(name)
         except presets_mod.PresetError as e:
-            messagebox.showerror('套用預設失敗', str(e))
+            messagebox.showerror('Failed to Apply Preset', str(e))
             return
 
-        # 順序有講究：peek 要先設好，surrender 才不會被 _sync_locks() 的
-        # 「peek 開著時 early surrender 自動退回 late」邏輯中途打回去
-        # ——那個檢查是靠 trace 即時觸發的，設定順序錯了會被中途攔截掉。
+        # order matters: peek has to be set first, or surrender can get
+        # overwritten mid-way by _sync_locks()'s "early surrender falls
+        # back to late while peek is on" logic -- that check fires
+        # immediately via a trace, so setting things in the wrong order
+        # gets intercepted partway through.
         self.decks.set(rules.num_decks)
         self.pen.set(rules.penetration * 100)
         self.csm.set(rules.continuous_shuffle)
@@ -1019,11 +1078,13 @@ class App:
 
         self._sync_locks()
         self._sync_seed_lock()
-        self.status.set(f'已套用預設：{label}')
+        self.status.set(f'Applied preset: {label}')
 
     def _sync_seed_lock(self):
-        # 沒勾「固定種子」的話，這個欄位只是顯示「上一次實際用了哪個種子」，
-        # 不給手動編輯，避免使用者以為自己調了種子但其實下一次還是會被蓋掉。
+        # with "fixed seed" unchecked, this field only displays "the seed
+        # actually used last run" and isn't editable, so the user can't be
+        # fooled into thinking they've set a seed that will just get
+        # overwritten next run anyway.
         self.sp_seed.configure(state='normal' if self.fixed_seed.get() else 'disabled')
 
     def _sync_locks(self):
@@ -1037,26 +1098,30 @@ class App:
             if self.surrender.get() == SURRENDER_EARLY:
                 self.surrender.set(SURRENDER_LATE)
                 self.cb_sur.current(1)
-            self.cb_sur.configure(values=['不可投降', 'late surrender'])
-            notes.append('莊家 peek：BJ 在玩家動作前就結算，因此無 early surrender，'
-                         'OBO 也無意義（本來就只輸原始注）。')
+            self.cb_sur.configure(values=['No surrender', 'Late surrender'])
+            notes.append('Dealer peek: BJ is settled before the player acts, so early '
+                         'surrender isn\'t available and OBO is meaningless (only the '
+                         'original bet is ever at risk anyway).')
         else:
             self.cb_obo.state(['!disabled'])
-            self.cb_sur.configure(values=['不可投降', 'late surrender', 'early surrender'])
-            notes.append('no-peek：莊家動作結束才翻底牌。late surrender 碰到莊家 BJ 會輸全額，'
-                         'early surrender 則不管莊家有沒有 BJ 都只輸一半。')
+            self.cb_sur.configure(values=['No surrender', 'Late surrender', 'Early surrender'])
+            notes.append('No-peek: the hole card is revealed only after the player finishes '
+                         'acting. Late surrender loses the full bet on a dealer BJ; early '
+                         'surrender always loses only half, regardless of whether the dealer has BJ.')
         if self.csm.get():
             self.sp_pen.state(['disabled'])
-            notes.append('CSM：每一手都重新洗牌，沒有切牌點，penetration 被忽略；'
-                         '算牌因此完全沒用（真數永遠貼近基準值，⊛ 算牌策略選了也沒意義）。')
+            notes.append('CSM: reshuffles every hand, no cut card, so penetration is ignored; '
+                         'card counting is therefore useless (the true count always stays near '
+                         'baseline -- selecting a * counting strategy has no effect).')
         else:
             self.sp_pen.state(['!disabled'])
         self.lock_note.configure(text='\n'.join(notes))
 
     def _update_precision(self):
-        # 這個欄位（self.hands）是「每次模擬要打幾手」，使用者直接輸入，
-        # 不用自己乘除；總回合數 = 每次手數 x 獨立實驗次數，這裡算出來顯示，
-        # 不是使用者要填的東西。
+        # this field (self.hands) is "how many hands to play per run,"
+        # entered directly by the user with no math required; the total
+        # round count = hands per run x independent runs, computed and
+        # displayed here -- it isn't something the user fills in themselves.
         try:
             per_session = int(float(self.hands.get()))
         except (ValueError, tk.TclError):
@@ -1070,27 +1135,28 @@ class App:
         total = per_session * sessions
 
         ci = 1.96 * 1.14 / (total ** 0.5) * 100
-        msg = f'= 總共 {total:,} 手（{per_session:,} 手 × {sessions:,} 次獨立實驗）'
-        msg += f'\n預期精度 ±{ci:.4f}%（95% CI）'
+        msg = f'= {total:,} total hands ({per_session:,} hands x {sessions:,} independent runs)'
+        msg += f'\nExpected precision +/-{ci:.4f}% (95% CI)'
         if ci > 0.22:
-            msg += '\n連 H17 這種 0.22% 的差異都分不出來'
+            msg += '\nNot even enough to resolve an H17-scale difference of 0.22%'
         elif ci > 0.08:
-            msg += '\n夠分辨 H17，但分不出投降/RSA 這種 0.08% 的差異'
+            msg += '\nEnough to resolve H17, but not a surrender/RSA-scale difference of 0.08%'
         elif ci > 0.02:
-            msg += '\n夠分辨大多數規則差異'
+            msg += '\nEnough to resolve most rule differences'
         else:
-            msg += '\n足以分辨 0.02% 等級的細微差異'
+            msg += '\nEnough to resolve differences as fine as 0.02%'
 
-        # 每次模擬的手數太少的話，資金曲線／分布圖幾乎只反映單手運氣，
-        # 不是長期趨勢（標準差就是單手的 1.14，不是引擎有問題）。
+        # too few hands per run and the bankroll curve/distribution charts
+        # mostly just reflect single-hand luck, not a long-term trend (the
+        # standard deviation is simply the per-hand 1.14, not an engine problem).
         if per_session < 30:
-            msg += (f'\n⚠ 每次模擬只有 {per_session} 手，資金曲線/分布圖幾乎'
-                     '\n  只反映單手運氣，不是長期趨勢。')
+            msg += (f'\n! Only {per_session} hands per run -- the bankroll curve/distribution'
+                     '\n  chart mostly reflects single-hand luck, not a long-term trend.')
         elif per_session < 1000:
-            msg += f'\n⚠ 每次模擬只有 {per_session:,} 手，波動主要來自短期運氣。'
+            msg += f'\n! Only {per_session:,} hands per run -- variance is mostly short-term luck.'
         self.precision.set(msg)
 
-    # ------------------------------------------------------------ 執行
+    # ------------------------------------------------------------ execution
     def _collect(self):
         rules = Rules(
             num_decks=int(self.decks.get()),
@@ -1121,17 +1187,17 @@ class App:
         try:
             per_session = int(float(self.hands.get()))
         except ValueError:
-            messagebox.showerror('輸入錯誤', '每次模擬手數要是數字')
+            messagebox.showerror('Input Error', 'Hands per run must be a number')
             return
         try:
             sessions_n = int(self.sessions.get())
         except (ValueError, tk.TclError):
-            messagebox.showerror('輸入錯誤', '獨立實驗次數要是數字')
+            messagebox.showerror('Input Error', 'Independent runs must be a number')
             return
-        hands = per_session * sessions_n     # run()/compare() 吃的是總回合數
+        hands = per_session * sessions_n     # run()/compare() take the total round count
         strategies = self._selected_strategies()
         if not strategies:
-            messagebox.showerror('輸入錯誤', '至少要選一個策略')
+            messagebox.showerror('Input Error', 'Select at least one strategy')
             return
         rules, notes = self._collect()
         sweep = self.sweep.get()
@@ -1143,9 +1209,12 @@ class App:
         else:
             configs = [(c, rules, c) for c in strategies]
 
-        # 沒勾「固定種子」就每次重新抽一個 —— 不然同樣的參數配上同一個種子
-        # 會產生位元級完全相同的牌局，圖表自然每次都長一樣，容易被誤會成沒有重畫。
-        # 抽完寫回欄位，讓使用者看得到這次實際用的是哪個種子（想重現就勾「固定」）。
+        # a fresh seed is drawn every run unless "fixed seed" is checked --
+        # otherwise the same parameters plus the same seed would produce a
+        # bit-for-bit identical shoe every time, so the charts would
+        # naturally look the same each run, easily mistaken for "nothing
+        # redrew." Written back to the field afterward so the user can see
+        # which seed this run actually used (check "fixed" to reproduce it).
         if not self.fixed_seed.get():
             self.seed.set(random.randrange(1, 2 ** 31 - 1))
         actual_seed = int(self.seed.get())
@@ -1156,15 +1225,15 @@ class App:
         self.btn_cancel.state(['!disabled'])
         self.btn_save.state(['disabled'])
         self.pbar['value'] = 0
-        self.status.set('準備中…')     # 別讓上一輪的「完成」留在畫面上
-        head = [f'規則：{rules.label()}   penetration {rules.penetration:.0%}',
-                f'模擬：每次 {per_session:,} 手 × {sessions_n:,} 次獨立實驗'
-                f' × {len(configs)} 個設定 = {hands*len(configs):,} 回合',
-                f'亂數種子：{actual_seed}'
-                + ('（固定）' if self.fixed_seed.get() else '（本次自動產生，未固定）')]
-        head += [f'  規則調整：{n}' for n in notes]
+        self.status.set('Preparing...')     # don't leave the previous run's "done" on screen
+        head = [f'Rules: {rules.label()}   penetration {rules.penetration:.0%}',
+                f'Simulating: {per_session:,} hands x {sessions_n:,} independent runs'
+                f' x {len(configs)} configuration(s) = {hands*len(configs):,} rounds',
+                f'Random seed: {actual_seed}'
+                + (' (fixed)' if self.fixed_seed.get() else ' (auto-generated this run, not fixed)')]
+        head += [f'  Rule adjustment: {n}' for n in notes]
         self.txt.delete('1.0', 'end')
-        self.txt.insert('end', '\n'.join(head) + '\n\n模擬中…\n')
+        self.txt.insert('end', '\n'.join(head) + '\n\nSimulating...\n')
 
         args = dict(configs=configs, hands=hands, sessions=sessions_n,
                     bet=float(self.bet.get()), seed=actual_seed,
@@ -1197,10 +1266,10 @@ class App:
 
     def _request_cancel(self):
         self.cancel.set()
-        self.status.set('取消中…（等目前的分段跑完）')
+        self.status.set('Cancelling... (waiting for the current chunk to finish)')
 
     def _drain(self):
-        """把 queue 清空。收到結束訊息回傳 True。"""
+        """Drain the queue. Returns True once a "finished" message is received."""
         try:
             while True:
                 msg = self.q.get_nowait()
@@ -1208,16 +1277,16 @@ class App:
                 if kind == 'progress':
                     done, total = msg[1], msg[2]
                     self.pbar['value'] = 1000 * done / total
-                    self.status.set(f'{done:,} / {total:,} 回合 ({done/total*100:.1f}%)')
+                    self.status.set(f'{done:,} / {total:,} rounds ({done/total*100:.1f}%)')
                 elif kind == 'done':
                     self._finish(msg[1], msg[2])
                     return True
                 elif kind == 'cancelled':
-                    self.status.set('已取消')
+                    self.status.set('Cancelled')
                     self._idle()
                     return True
                 elif kind == 'error':
-                    self.status.set('發生錯誤')
+                    self.status.set('Error')
                     self.txt.insert('end', '\n' + msg[1])
                     self._idle()
                     return True
@@ -1225,9 +1294,11 @@ class App:
             return False
 
     def _poll(self):
-        # 順序很重要：先確認執行緒是否還活著，再清 queue。
-        # 反過來的話，執行緒可能在「清完 queue」與「檢查存活」之間結束，
-        # 最後一則訊息就再也沒人讀，狀態會永遠卡在「取消中…」。
+        # order matters: check whether the thread is still alive before
+        # draining the queue. Reversed, the thread could finish in the gap
+        # between "drain the queue" and "check alive," and the final
+        # message would never be read, leaving the status stuck on
+        # "Cancelling..." forever.
         alive = bool(self.worker and self.worker.is_alive())
         if self._drain():
             self._after_id = None
@@ -1250,20 +1321,20 @@ class App:
             s = summarize(merged, a['bankroll'], a['bet'])
             s['label'] = label
             summaries.append(s)
-            lines.append(f'── {label} ' + '─' * max(2, 60 - len(label)))
+            lines.append(f'-- {label} ' + '-' * max(2, 60 - len(label)))
             lines.append(format_summary(s))
             lines.append('')
         if len(summaries) > 1:
             base = summaries[0]
             lines.append('=' * 70)
-            lines.append('對比（共用亂數：所有設定拿到同一副洗好的牌）')
-            lines.append(f"  {'設定':<26}{'賭場優勢':>13}{'95% CI':>11}{'相對差異':>12}")
+            lines.append('Comparison (Common Random Numbers: every configuration draws the same shuffled shoe)')
+            lines.append(f"  {'Configuration':<26}{'House edge':>13}{'95% CI':>11}{'Relative diff':>14}")
             for s in summaries:
                 d = (s['house_edge'] - base['house_edge']) * 100
                 pooled = ((s['house_edge_ci95'] ** 2 + base['house_edge_ci95'] ** 2)
                           ** 0.5) * 100
                 tag = '' if s is base else (f"{d:+.4f}%" +
-                                            ('' if abs(d) > pooled else ' (分辨不出)'))
+                                            ('' if abs(d) > pooled else ' (not resolvable)'))
                 lines.append(f"  {s['label']:<26}{s['house_edge']*100:>12.4f}%"
                              f"{s['house_edge_ci95']*100:>10.4f}%{tag:>16}")
         self.summaries = summaries
@@ -1276,18 +1347,21 @@ class App:
         if a['sessions'] > 1:
             self._draw('dist', ch.result_distribution(groups))
         else:
-            # 只有 1 個 session 就只有 1 個樣本點，畫不出分布，
-            # 但畫面不能什麼都不做——不然使用者會以為沒有重新整理，
-            # 其實是上一次跑的舊圖還留在畫面上。明講清楚並清掉舊圖。
+            # with only 1 session there's only 1 sample point, so no
+            # distribution can be drawn -- but the panel can't just do
+            # nothing, or the user might think it failed to refresh when
+            # it's really just an old chart left over from last time.
+            # Say so explicitly and clear the old chart.
             self._clear_chart(
-                'dist', '獨立實驗次數目前是 1，只有一個樣本點，\n畫不出分布。'
-                        '把「獨立實驗次數」調到 2 以上再跑一次。')
+                'dist', 'Independent runs is currently 1, giving only a single sample\n'
+                        'point -- can\'t draw a distribution. Set "independent runs" to\n'
+                        '2 or more and run again.')
         if len(summaries) > 1:
             self._draw('cmp', ch.edge_comparison(summaries))
             self.nb.select(3)
         else:
             self.nb.select(1)
-        self.status.set('完成')
+        self.status.set('Done')
         self.btn_save.state(['!disabled'])
         self._idle()
 
@@ -1304,14 +1378,19 @@ class App:
         toolbar.pack(side='bottom', fill='x')
         canvas.get_tk_widget().pack(fill='both', expand=True)
 
-        # tight_layout() 算的邊界是照 charts.py 建圖時的預設尺寸（例如寬 10 吋）。
-        # 但這個面板通常比那個尺寸窄，圖被壓縮嵌進來時邊界沒有重算，
-        # 左側的座標數字／刻度就會被擠到畫布外面看不到。resize 時要重算一次。
-        # <Configure> 在拖曳視窗時會連續觸發很多次，用 after 做防手震，
-        # 累積 120ms 沒有新事件才真的重畫一次，不然拖窗會頓。
-        # job id 存在 slot 裡（而不是這裡的區域變數），這樣重畫圖表或關視窗時
-        # 才找得到還沒觸發的排程去取消掉，不然視窗關閉後排程觸發會對著
-        # 已經銷毀的 widget 操作而噴錯。
+        # tight_layout()'s computed margins are based on charts.py's
+        # default figure size when it was created (e.g. 10 inches wide).
+        # But this panel is usually narrower than that, so when the figure
+        # is squeezed in without recomputing margins, the left-side axis
+        # labels/ticks get pushed off the edge of the canvas and clipped.
+        # Needs a recompute on resize. <Configure> fires many times in a
+        # row while dragging the window, so this debounces with after:
+        # only actually redraws once 120ms have passed with no new event,
+        # or dragging the window would stutter. The job id is stored in
+        # slot (not a local variable here) so a redraw or window close can
+        # still find and cancel a not-yet-fired job -- otherwise a fired
+        # job after the window closes would operate on an already-
+        # destroyed widget and raise an error.
         def relayout():
             slot['job_id'] = None
             try:
@@ -1324,18 +1403,22 @@ class App:
             self._cancel_relayout(slot)
             slot['job_id'] = self.root.after(120, relayout)
 
-        # add='+'：matplotlib 自己在 FigureCanvasTk.__init__ 就對同一個 widget
-        # 綁過一次 <Configure> -> self.resize（負責讓畫布的實際像素尺寸跟著視窗
-        # 縮放）。如果這裡不加 add='+'，bind() 預設會直接取代掉那個綁定，
-        # 圖形內容就停在建立當時的尺寸，視窗變寬時右側會整塊空白。
+        # add='+': matplotlib itself already binds <Configure> -> self.resize
+        # on this same widget inside FigureCanvasTk.__init__ (responsible
+        # for keeping the canvas's actual pixel size in sync with the
+        # window as it's resized). Without add='+' here, bind() would
+        # simply replace that binding, and the figure content would stay
+        # frozen at its creation-time size, leaving a blank strip on the
+        # right when the window widens.
         canvas.get_tk_widget().bind('<Configure>', on_configure, add='+')
         fig.tight_layout()
         canvas.draw()
         slot.update(canvas=canvas, toolbar=toolbar, fig=fig)
 
     def _clear_chart(self, key, message):
-        """把某個圖表分頁清空並顯示說明文字（用在畫不出圖的情況，
-        避免留著上一次跑的舊圖讓人誤以為畫面沒有更新）。"""
+        """Clear a chart tab and show an explanatory message (used when a
+        chart can't be drawn, so a stale chart from last run doesn't sit
+        there looking like the display just didn't update)."""
         slot = self.canvases[key]
         self._cancel_relayout(slot)
         if slot['canvas'] is not None:
@@ -1356,7 +1439,7 @@ class App:
         self.cancel.set()
         self.scen_cancel.set()
         if self._after_id is not None:
-            self.root.after_cancel(self._after_id)   # 別讓 callback 在視窗銷毀後才觸發
+            self.root.after_cancel(self._after_id)   # don't let the callback fire after the window is destroyed
             self._after_id = None
         if self.scen_after_id is not None:
             self.root.after_cancel(self.scen_after_id)
@@ -1366,7 +1449,7 @@ class App:
         self.root.destroy()
 
     def _export(self):
-        d = filedialog.askdirectory(title='選擇輸出資料夾')
+        d = filedialog.askdirectory(title='Choose Output Folder')
         if not d:
             return
         saved = []
@@ -1379,7 +1462,7 @@ class App:
         with open(os.path.join(d, 'summary.txt'), 'w') as f:
             f.write(self.txt.get('1.0', 'end'))
         saved.append('summary.txt')
-        messagebox.showinfo('已匯出', '\n'.join(saved))
+        messagebox.showinfo('Exported', '\n'.join(saved))
 
 
 def main():

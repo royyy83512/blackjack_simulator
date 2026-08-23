@@ -1,4 +1,5 @@
-"""Blackjack 模擬核心。
+"""Blackjack simulation core.
 
-刻意不依賴 matplotlib 與 tkinter，可以單獨拿去 PyPy 跑大量手數。
+Deliberately has no dependency on matplotlib or tkinter, so it can run
+standalone under PyPy for high-volume runs.
 """

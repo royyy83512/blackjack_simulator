@@ -1,23 +1,24 @@
-"""賭場規則設定。
+"""Casino rule configuration.
 
-一個 Rules 物件描述一張桌子的完整規則。規則之間有邏輯衝突時由
-normalize() 統一修正，並回報哪些選項被鎖定，讓 UI 可以顯示原因。
+A Rules object describes the complete rule set for one table. When rules
+logically conflict, normalize() resolves them and reports which options
+got overridden, so the UI can show the reason.
 """
 from dataclasses import dataclass, replace, asdict
 
-# surrender 模式
+# surrender modes
 SURRENDER_NONE = 'none'
-SURRENDER_LATE = 'late'    # 莊家確認沒有 BJ 之後才能投降
-SURRENDER_EARLY = 'early'  # 莊家檢查 BJ 之前就能投降（只有 no-peek 才成立）
+SURRENDER_LATE = 'late'    # can only surrender after the dealer checks for no BJ
+SURRENDER_EARLY = 'early'  # can surrender before the dealer checks for BJ (no-peek only)
 
-# 可以加倍的時機
-DOUBLE_ANY2 = 'any2'      # 任兩張都能加倍
-DOUBLE_9_11 = '9-11'      # 只有硬 9/10/11
-DOUBLE_10_11 = '10-11'    # 只有硬 10/11
+# when doubling is allowed
+DOUBLE_ANY2 = 'any2'      # any two starting cards
+DOUBLE_9_11 = '9-11'      # hard 9/10/11 only
+DOUBLE_10_11 = '10-11'    # hard 10/11 only
 
-# 莊家 BJ 時玩家的損失範圍（僅 no-peek 有意義）
-LOSS_ALL = 'all'           # busted bets：分牌/加倍的追加注全輸
-LOSS_ORIGINAL = 'original' # OBO：只輸原始注，追加注退還
+# how much the player loses on a dealer BJ (only meaningful under no-peek)
+LOSS_ALL = 'all'           # busted bets: extra wagers from doubles/splits are all lost
+LOSS_ORIGINAL = 'original' # OBO (original bets only): extra wagers are returned
 
 DECK_MIN, DECK_MAX = 2, 8
 
@@ -25,30 +26,30 @@ DECK_MIN, DECK_MAX = 2, 8
 @dataclass(frozen=True)
 class Rules:
     num_decks: int = 6
-    penetration: float = 0.75          # 發到幾成放切牌（CSM 開啟時無意義）
-    continuous_shuffle: bool = False   # CSM：每一手都重新洗牌，沒有切牌點
+    penetration: float = 0.75          # fraction dealt before the cut card (irrelevant if CSM is on)
+    continuous_shuffle: bool = False   # CSM: reshuffles every hand, no cut card
     dealer_hits_soft_17: bool = False  # H17 / S17
     double_rule: str = DOUBLE_ANY2
     double_after_split: bool = True    # DAS
     surrender: str = SURRENDER_LATE
-    surrender_vs_ace: bool = True      # 有些賭場莊家 A 不給投降
-    dealer_peek: bool = True           # 莊家有底牌並偷看
+    surrender_vs_ace: bool = True      # some casinos don't offer surrender vs. dealer ace
+    dealer_peek: bool = True           # dealer has a hole card and peeks at it
     resplit_aces: bool = False         # RSA
-    hit_split_aces: bool = False       # 分 A 之後還能補牌
+    hit_split_aces: bool = False       # can hit again after splitting aces
     blackjack_pays: float = 1.5        # 3:2 = 1.5, 6:5 = 1.2
-    dealer_bj_loss: str = LOSS_ALL     # 見 LOSS_* （peek 模式下無意義）
+    dealer_bj_loss: str = LOSS_ALL     # see LOSS_* (irrelevant in peek mode)
     insurance_offered: bool = True
 
-    # 固定不開放調整：各家賭場一致
-    max_split_hands: int = 4           # 分牌最多 4 手（A 除外，見 resplit_aces）
+    # fixed, not user-adjustable: consistent across casinos
+    max_split_hands: int = 4           # max 4 hands from splitting (aces excepted, see resplit_aces)
 
-    # ---- 衍生性質 ----
+    # ---- derived properties ----
     @property
     def can_double_soft(self) -> bool:
         return self.double_rule == DOUBLE_ANY2
 
     def surrender_allowed_vs(self, upcard: int) -> bool:
-        """這張明牌能不能投降。"""
+        """Whether surrender is legal against this particular upcard."""
         if self.surrender == SURRENDER_NONE:
             return False
         return self.surrender_vs_ace or upcard != 1
@@ -88,34 +89,38 @@ class Rules:
 
 
 def normalize(rules: Rules):
-    """修掉互相矛盾的規則組合。
+    """Resolve mutually contradictory rule combinations.
 
-    回傳 (修正後的 Rules, [說明字串])。UI 可以拿說明去 disable 對應的控制項。
+    Returns (fixed Rules, [note strings]). The UI can use the notes to
+    disable the corresponding controls.
     """
     notes = []
     r = rules
 
     if not (DECK_MIN <= r.num_decks <= DECK_MAX):
         clamped = max(DECK_MIN, min(DECK_MAX, r.num_decks))
-        notes.append(f"牌副數 {r.num_decks} 超出 {DECK_MIN}-{DECK_MAX}，改為 {clamped}")
+        notes.append(f"Number of decks {r.num_decks} is out of range {DECK_MIN}-{DECK_MAX}, clamped to {clamped}")
         r = replace(r, num_decks=clamped)
 
     if not (0.30 <= r.penetration <= 0.95):
         clamped = max(0.30, min(0.95, r.penetration))
-        notes.append(f"penetration 需在 30%-95%，改為 {clamped:.0%}")
+        notes.append(f"Penetration must be between 30%-95%, clamped to {clamped:.0%}")
         r = replace(r, penetration=clamped)
 
     if r.continuous_shuffle:
-        notes.append("連續洗牌機 (CSM)：每一手都重新洗牌，沒有切牌點，"
-                     "penetration 設定被忽略；算牌因此完全沒用（真數永遠貼近基準值）")
+        notes.append("Continuous shuffling machine (CSM): reshuffles every hand, no cut card, "
+                     "so the penetration setting is ignored; card counting is therefore useless "
+                     "(the true count always stays near its baseline)")
 
     if r.dealer_peek:
-        # 莊家會偷看底牌，玩家在下決定時 BJ 早就結算完了
+        # the dealer peeks at the hole card, so BJ is already settled before the player acts
         if r.surrender == SURRENDER_EARLY:
-            notes.append("莊家 peek 時無法 early surrender（BJ 已先結算），改為 late surrender")
+            notes.append("Early surrender isn't possible when the dealer peeks (BJ is already "
+                         "settled), switched to late surrender")
             r = replace(r, surrender=SURRENDER_LATE)
         if r.dealer_bj_loss != LOSS_ALL:
-            notes.append("莊家 peek 時本來就只輸原始注，OBO 選項無意義")
+            notes.append("With dealer peek, only the original bet is ever at risk anyway, "
+                         "so the OBO option is meaningless")
             r = replace(r, dealer_bj_loss=LOSS_ALL)
 
     return r, notes

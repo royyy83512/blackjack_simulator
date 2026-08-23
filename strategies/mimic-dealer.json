@@ -1,6 +1,6 @@
 {
   "name": "mimic-dealer",
-  "description": "完全模仿莊家：補到 17 為止，不分牌不加倍不投降",
+  "description": "Fully mimics the dealer: hits until 17, never splits, doubles, or surrenders",
   "tables": {
     "hard": {
       "4": "H  H  H  H  H  H  H  H  H   H",
