@@ -764,21 +764,21 @@ class App:
         """Show the infinite-deck exact solution first (computed instantly,
         splits excluded) as a quick reference; the Monte Carlo result
         (includes splits, uses the actual deck count) is appended once it
-        finishes."""
+        finishes.
+
+        Kept deliberately short: a user glancing at this only needs the
+        table's current recommendation and, once Monte Carlo lands, whether
+        it agrees -- not an essay on methodology. The full EV/CI/SD
+        breakdown per action is kept (in both this method and
+        _finish_scenario below), since that's the part that's actually
+        useful for comparing strategies, not just the single best pick.
+        """
         lines = [f'Player {self._card_name(c1)},{self._card_name(c2)} vs. dealer '
                 f'{self._card_name(up)}   ({rules.label()})',
-                f'Random seed: {seed}' + (' (fixed)' if self.fixed_seed.get() else ' (auto-generated this run, not fixed)'),
+                f'Seed: {seed}' + (' (fixed)' if self.fixed_seed.get() else ' (auto)'),
                 '']
-        # explicitly call out "what the strategy table currently
-        # recommends," or users can easily mistake the "exact solution"
-        # below for the strategy table's answer -- the exact solution is
-        # an independently computed mathematical result every time,
-        # consulting no JSON at all, and won't change if the strategy file
-        # is edited; only this line actually reads the strategy file, and
-        # only updates after "update strategy table" is pressed and this
-        # is recomputed.
         table_name = getattr(self, '_scen_table_action', None)
-        lines.append(f'The current strategy table ({self.cb_scen_strategy.get()}) recommends: '
+        lines.append(f'Strategy table ({self.cb_scen_strategy.get()}) recommends: '
                      + (table_name if table_name else '(unable to determine)'))
         lines.append('')
 
@@ -791,30 +791,15 @@ class App:
             col = 9 if up == 1 else up - 2
             solved = solver_solve(rules)
             letter, evs = solved[kind][total][col]
-            lines.append('Exact solution (infinite deck, splits excluded, computed instantly, zero error;'
-                         '\nunrelated to the strategy table above -- this consults no JSON at all, it\'s'
-                         '\nrecomputed mathematically every time, and won\'t change if the strategy file'
-                         '\ndoes, since it was never derived from the strategy file to begin with):')
+            lines.append('Exact solution (infinite deck, splits excluded):')
             for k in sorted(evs, key=evs.get, reverse=True):
-                tag = '  <- exact-solution best (splits not compared)' if k == letter else ''
+                tag = '  <- best' if k == letter else ''
                 lines.append(f'  {k:<3} EV = {evs[k]:+.5f}{tag}')
             if is_pair:
-                lines.append('  (this hand is a pair, and the exact solution has no split option --'
-                             '\n   splits bring in DAS/RSA/resplitting complexity that makes an exact'
-                             '\n   solution too expensive, so splits can only be compared via the Monte'
-                             '\n   Carlo below)')
-            lines.append('')
-            lines.append('This exact solution assumes an infinite deck; marginal cells can have a'
-                         '\ndifferent answer at your real (smaller) deck count (measured, e.g., for A,2'
-                         '\nvs. 5). The Monte Carlo below uses your actual configured deck count, and'
-                         '\nwill be compared against the "strategy table recommends" line above'
-                         '\n(not against the exact solution):')
+                lines.append('  (pair -- splits not compared here, see Monte Carlo below)')
             lines.append('')
         except Exception as e:
-            lines.append(f'(exact solution computation failed: {e})')
-        # progress is already shown via the self.scen_status StringVar as
-        # "Computing...", no need to repeat that here, or it would run
-        # together with the Monte Carlo results once they land.
+            lines.append(f'(exact solution failed: {e})')
         self.scen_result_text.delete('1.0', 'end')
         self.scen_result_text.insert('end', '\n'.join(lines))
 
@@ -881,45 +866,40 @@ class App:
     def _finish_scenario(self, results):
         self.scen_status.set('Done')
         self._scenario_idle()
-        lines = ['Monte Carlo (splits included, actual deck count) -- best to worst:', '']
+        lines = ['Monte Carlo (splits included, actual deck count):', '']
         best = results[0]
         for act, name, ev, ci, sd in results:
             tag = '  <- best' if (act, name) == (best[0], best[1]) else ''
             lines.append(f'  {name:<10} EV = {ev:+.5f} +/- {ci:.5f}   SD={sd:.3f}{tag}')
-
-        # "what the simulation concluded" differing from "what the
-        # strategy table currently recommends" doesn't necessarily mean
-        # the table is wrong -- Monte Carlo carries sampling error, and
-        # the gap needs to exceed both sides' combined confidence
-        # intervals to count as genuinely significant; otherwise it's
-        # often just noise, and more hands are needed to tell.
-        table_name = getattr(self, '_scen_table_action', None)
         lines.append('')
+
+        # A gap between "what the simulation concluded" and "what the
+        # strategy table recommends" only counts once it exceeds both
+        # sides' combined confidence intervals -- otherwise it's sampling
+        # noise, not a real difference. See _offer_table_update() for what
+        # happens when it's genuinely significant.
+        table_name = getattr(self, '_scen_table_action', None)
         if table_name is None:
-            lines.append('(unable to determine what the strategy table currently recommends, skipping comparison)')
+            lines.append('(unable to determine strategy table recommendation)')
         elif table_name == best[1]:
-            lines.append(f'Matches the strategy table: the current recommendation of "{table_name}" is exactly what Monte Carlo found best.')
+            lines.append(f'Matches strategy table: "{table_name}" is best.')
         else:
             table_row = next((r for r in results if r[1] == table_name), None)
             if table_row is None:
-                lines.append(f'The strategy table recommends "{table_name}," but that action isn\'t legal for this opening'
-                             ' (the table itself may not account for the current rule restrictions).')
+                lines.append(f'Table recommends "{table_name}," but that action isn\'t legal here.')
             else:
                 _a2, _n2, table_ev, table_ci, _sd2 = table_row
                 gap = best[2] - table_ev
                 pooled = (best[3] ** 2 + table_ci ** 2) ** 0.5
                 if gap > pooled:
-                    lines.append(f'! The strategy table recommends "{table_name}," but Monte Carlo found "{best[1]}"'
-                                 f' significantly better:')
-                    lines.append(f'   Gap of {gap:+.5f}, larger than the combined margin of +/-{pooled:.5f}'
-                                 ' -- this cell might genuinely need to change.')
+                    lines.append(f'! Table says "{table_name}," but "{best[1]}" is significantly better '
+                                 f'(gap {gap:+.5f} > +/-{pooled:.5f} margin).')
                     self.scen_result_text.insert('end', '\n'.join(lines) + '\n')
                     self._offer_table_update(results)
                     return
                 else:
-                    lines.append(f'The strategy table recommends "{table_name}," and Monte Carlo found "{best[1]}" as the best,')
-                    lines.append(f'but the gap of {gap:+.5f} doesn\'t exceed the margin of +/-{pooled:.5f} --')
-                    lines.append('   not enough hands yet to tell whether it\'s a genuine improvement or sampling noise. Try more hands.')
+                    lines.append(f'Table says "{table_name}"; "{best[1]}" looks better but the gap '
+                                 f'{gap:+.5f} is within noise (+/-{pooled:.5f}) -- try more hands.')
         self.scen_result_text.insert('end', '\n'.join(lines))
 
     def _offer_table_update(self, results):
