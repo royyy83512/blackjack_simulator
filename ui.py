@@ -378,7 +378,12 @@ class App:
     def _build_run(self, parent):
         f = ttk.Frame(parent, padding=(0, 10))
         f.pack(fill='x')
-        self.btn_run = ttk.Button(f, text='Start Simulation', command=self._start)
+        # plain tk.Button with default='active' (not ttk.Button) renders as
+        # macOS's native prominent blue button, making the primary action
+        # visually stand out from Cancel/Export -- ttk's Aqua theme has no
+        # supported way to recolor a ttk.Button.
+        self.btn_run = tk.Button(f, text='Start Simulation', command=self._start,
+                                 default='active', highlightthickness=0)
         self.btn_run.pack(side='left')
         self.btn_cancel = ttk.Button(f, text='Cancel', command=self._request_cancel,
                                      state='disabled')
@@ -620,7 +625,8 @@ class App:
 
         run_row = ttk.Frame(parent, padding=(8, 0, 8, 8))
         run_row.pack(fill='x')
-        self.btn_scen_run = ttk.Button(run_row, text='Compute', command=self._start_scenario)
+        self.btn_scen_run = tk.Button(run_row, text='Compute', command=self._start_scenario,
+                                      default='active', highlightthickness=0)
         self.btn_scen_run.pack(side='left')
         self.btn_scen_cancel = ttk.Button(run_row, text='Cancel', command=self._cancel_scenario,
                                           state='disabled')
@@ -711,7 +717,7 @@ class App:
 
         self.scen_cancel.clear()
         self.scen_q = queue.Queue()
-        self.btn_scen_run.state(['disabled'])
+        self.btn_scen_run.configure(state='disabled')
         self.btn_scen_cancel.state(['!disabled'])
         self.scen_pbar['value'] = 0
         self.scen_status.set('Computing...')
@@ -869,7 +875,7 @@ class App:
             return False
 
     def _scenario_idle(self):
-        self.btn_scen_run.state(['!disabled'])
+        self.btn_scen_run.configure(state='normal')
         self.btn_scen_cancel.state(['disabled'])
 
     def _finish_scenario(self, results):
@@ -1215,7 +1221,7 @@ class App:
 
         self.cancel.clear()
         self.q = queue.Queue()
-        self.btn_run.state(['disabled'])
+        self.btn_run.configure(state='disabled')
         self.btn_cancel.state(['!disabled'])
         self.btn_save.state(['disabled'])
         self.pbar['value'] = 0
@@ -1304,7 +1310,7 @@ class App:
             self._idle()
 
     def _idle(self):
-        self.btn_run.state(['!disabled'])
+        self.btn_run.configure(state='normal')
         self.btn_cancel.state(['disabled'])
 
     def _finish(self, results, a):
