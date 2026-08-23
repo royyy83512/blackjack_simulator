@@ -109,17 +109,17 @@ def load_strategy_list():
     return [(f"{'* ' if counting else ''}{name}", name, desc)
             for name, desc, counting in strategy_mod.describe()]
 
-SWEEP_LABELS = [('No comparison (single configuration)', ''),
-                ('Compare: deck count', 'decks'),
-                ('Compare: CSM (continuous shuffler)', 'csm'),
-                ('Compare: surrender vs. dealer ace', 'surrender-ace'),
-                ('Compare: S17 / H17', 'h17'),
-                ('Compare: DAS on/off', 'das'),
-                ('Compare: surrender rules', 'surrender'),
-                ('Compare: peek / no-peek / OBO', 'peek'),
-                ('Compare: splitting aces rules', 'rsa'),
-                ('Compare: when doubling is allowed', 'double'),
-                ('Compare: BJ payout 3:2 / 6:5', 'bj')]
+SWEEP_LABELS = [('None (single config)', ''),
+                ('Deck count', 'decks'),
+                ('CSM (continuous shuffler)', 'csm'),
+                ('Surrender vs. dealer ace', 'surrender-ace'),
+                ('S17 / H17', 'h17'),
+                ('DAS on/off', 'das'),
+                ('Surrender rules', 'surrender'),
+                ('Peek / no-peek / OBO', 'peek'),
+                ('Splitting aces rules', 'rsa'),
+                ('When doubling is allowed', 'double'),
+                ('BJ payout 3:2 / 6:5', 'bj')]
 
 
 class App:
@@ -130,7 +130,7 @@ class App:
         # size the window to the screen's usable space, minus a rough
         # allowance for the menu bar/dock; don't assume the same fixed
         # height on every screen -- laptop screens are often shorter than this.
-        root.geometry(f'{min(1360, sw - 60)}x{min(900, sh - 120)}')
+        root.geometry(f'{min(1360, sw - 60)}x{min(960, sh - 120)}')
         root.minsize(1000, 560)
         self.q = queue.Queue()
         self.cancel = threading.Event()
@@ -196,7 +196,7 @@ class App:
         # pushed out of view by a long rule list.
         outer = ttk.Frame(self.root, padding=8)
         outer.pack(fill='both', expand=True)
-        left = ttk.Frame(outer, width=330)
+        left = ttk.Frame(outer, width=380)
         left.pack(side='left', fill='y', padx=(0, 10))
         right = ttk.Frame(outer)
         right.pack(side='left', fill='both', expand=True)
@@ -215,9 +215,9 @@ class App:
         # on any screen with no scrolling required.
         nb = ttk.Notebook(left)
         nb.pack(side='top', fill='both', expand=True)
-        tab_rules = ttk.Frame(nb, padding=(4, 6))
-        tab_sim = ttk.Frame(nb, padding=(4, 6))
-        tab_strategy = ttk.Frame(nb, padding=(4, 6))
+        tab_rules = ttk.Frame(nb, padding=(4, 3))
+        tab_sim = ttk.Frame(nb, padding=(4, 3))
+        tab_strategy = ttk.Frame(nb, padding=(4, 3))
         nb.add(tab_rules, text='Casino Rules')
         nb.add(tab_sim, text='Simulation')
         nb.add(tab_strategy, text='Strategy / Compare')
@@ -232,17 +232,17 @@ class App:
         ttk.Label(parent, text=text).grid(row=r, column=0, sticky='w', pady=2)
 
     def _build_rules(self, parent):
-        preset_box = ttk.LabelFrame(parent, text=' Casino Presets (One-Click) ', padding=8)
-        preset_box.pack(fill='x', pady=(0, 8))
+        preset_box = ttk.LabelFrame(parent, text=' Casino Presets (One-Click) ', padding=5)
+        preset_box.pack(fill='x', pady=(0, 4))
         row = ttk.Frame(preset_box)
         row.pack(fill='x')
-        self.cb_preset = ttk.Combobox(row, width=22, state='readonly')
+        self.cb_preset = ttk.Combobox(row, width=24, state='readonly')
         self.cb_preset.pack(side='left')
         ttk.Button(row, text='Apply', command=self._apply_preset).pack(side='left', padx=6)
         ttk.Button(row, text='Reload', command=self._fill_presets).pack(side='left')
         self._fill_presets()
 
-        f = ttk.LabelFrame(parent, text=' Casino Rules ', padding=8)
+        f = ttk.LabelFrame(parent, text=' Casino Rules ', padding=5)
         f.pack(fill='x')
         r = 0
         self._row(f, r, 'Number of decks')
@@ -254,7 +254,7 @@ class App:
                                   textvariable=self.pen)
         self.sp_pen.grid(row=r, column=1, sticky='w')
         r += 1
-        self.cb_csm = ttk.Checkbutton(f, text='Continuous shuffling machine (CSM): reshuffles every hand, no cut card',
+        self.cb_csm = ttk.Checkbutton(f, text='Continuous shuffling machine (CSM)',
                                       variable=self.csm)
         self.cb_csm.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
@@ -264,7 +264,7 @@ class App:
         ttk.Radiobutton(box, text='H17 (hit)', variable=self.h17, value=True).pack(side='left')
         r += 1
         self._row(f, r, 'When doubling is allowed')
-        self.cb_double = ttk.Combobox(f, width=14, state='readonly',
+        self.cb_double = ttk.Combobox(f, width=16, state='readonly',
                                       values=['Any two cards', 'Only 9/10/11', 'Only 10/11'])
         self.cb_double.current(0)
         self.cb_double.bind('<<ComboboxSelected>>', self._on_double)
@@ -278,15 +278,15 @@ class App:
         # acts) -- the peek toggle needs to be understood first, or the
         # surrender dropdown's varying number of options (two vs. three)
         # won't make sense.
-        self.cb_peek = ttk.Checkbutton(f, text='Dealer deals and checks the hole card (peek)', variable=self.peek)
+        self.cb_peek = ttk.Checkbutton(f, text='Dealer checks hole card (peek)', variable=self.peek)
         self.cb_peek.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self.cb_obo = ttk.Checkbutton(f, text='Player only loses the original bet on dealer BJ (OBO)',
+        self.cb_obo = ttk.Checkbutton(f, text='OBO (lose original bet only on dealer BJ)',
                                       variable=self.obo)
         self.cb_obo.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
         self._row(f, r, 'Surrender')
-        self.cb_sur = ttk.Combobox(f, width=14, state='readonly',
+        self.cb_sur = ttk.Combobox(f, width=18, state='readonly',
                                    values=['No surrender', 'Late surrender', 'Early surrender'])
         self.cb_sur.current(1)
         self.cb_sur.bind('<<ComboboxSelected>>', self._on_sur)
@@ -296,20 +296,19 @@ class App:
                                           variable=self.sur_vs_ace)
         self.cb_sur_ace.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self.cb_rsa = ttk.Checkbutton(f, text='Resplit aces allowed (RSA)', variable=self.rsa)
-        self.cb_rsa.grid(row=r, column=0, columnspan=2, sticky='w')
-        r += 1
-        self.cb_hsa = ttk.Checkbutton(f, text='Can hit after splitting aces', variable=self.hsa)
-        self.cb_hsa.grid(row=r, column=0, columnspan=2, sticky='w')
+        aces_box = ttk.Frame(f)
+        aces_box.grid(row=r, column=0, columnspan=2, sticky='w')
+        self.cb_rsa = ttk.Checkbutton(aces_box, text='Resplit aces (RSA)', variable=self.rsa)
+        self.cb_rsa.pack(side='left')
+        self.cb_hsa = ttk.Checkbutton(aces_box, text='Hit split aces', variable=self.hsa)
+        self.cb_hsa.pack(side='left', padx=(14, 0))
         r += 1
         ttk.Checkbutton(f, text='BJ pays only 6:5 (otherwise 3:2)', variable=self.bj65
                         ).grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
-        self.lock_note = ttk.Label(f, text='', foreground='#b45309', wraplength=250,
+        self.lock_note = ttk.Label(f, text='', foreground='#b45309', wraplength=340,
                                    justify='left')
-        self.lock_note.grid(row=r, column=0, columnspan=2, sticky='w', pady=(6, 0))
-        ttk.Label(f, text='Split cap is fixed at 4 hands', foreground='#64748b'
-                  ).grid(row=r + 1, column=0, columnspan=2, sticky='w')
+        self.lock_note.grid(row=r, column=0, columnspan=2, sticky='w', pady=(2, 0))
 
     def _build_sim(self, parent):
         f = ttk.LabelFrame(parent, text=' Simulation Settings ', padding=8)
@@ -339,7 +338,7 @@ class App:
         self.sp_seed.grid(row=r, column=1, sticky='w')
         r += 1
         self.cb_fixed_seed = ttk.Checkbutton(
-            f, text='Fixed seed (reproduce the same result)', variable=self.fixed_seed,
+            f, text='Fixed seed (reproducible)', variable=self.fixed_seed,
             command=self._sync_seed_lock)
         self.cb_fixed_seed.grid(row=r, column=0, columnspan=2, sticky='w')
         r += 1
@@ -362,13 +361,13 @@ class App:
                    ).pack(side='left')
         ttk.Label(bar, text='  * = card counting', foreground='#64748b').pack(side='left')
         ttk.Separator(f2, orient='horizontal').pack(fill='x', pady=5)
-        ttk.Checkbutton(f2, text='Strategy table adapts automatically to the rules', variable=self.adaptive).pack(anchor='w')
+        ttk.Checkbutton(f2, text='Strategy table adapts to the rules', variable=self.adaptive).pack(anchor='w')
         ttk.Label(f2, text='Unchecked = ignore the overrides in the strategy file,\nto see the cost of using the wrong strategy table',
                   foreground='#64748b', justify='left').pack(anchor='w')
 
         f3 = ttk.LabelFrame(parent, text=' Rule Comparison ', padding=8)
         f3.pack(fill='x', pady=(8, 0))
-        self.cb_sweep = ttk.Combobox(f3, width=28, state='readonly',
+        self.cb_sweep = ttk.Combobox(f3, width=26, state='readonly',
                                      values=[n for n, _ in SWEEP_LABELS])
         self.cb_sweep.current(0)
         self.cb_sweep.bind('<<ComboboxSelected>>', self._on_sweep)
@@ -397,13 +396,13 @@ class App:
         self.nb.pack(fill='both', expand=True)
         self.txt = tk.Text(self.nb, wrap='none', font=('Menlo', 11), padx=10, pady=10)
         self.nb.add(self.txt, text='Summary')
-        for key, title in (('bankroll', 'Bankroll Curves'), ('dist', 'Result Distribution'), ('cmp', 'Comparison')):
+        for key, title in (('bankroll', 'Bankroll'), ('dist', 'Distribution'), ('cmp', 'Compare')):
             frame = ttk.Frame(self.nb)
             self.nb.add(frame, text=title)
             self.canvases[key] = {'frame': frame, 'canvas': None, 'toolbar': None,
                                   'fig': None, 'job_id': None}
-        self._build_strategy_view(self._add_tab('Strategy Table'))
-        self._build_scenario_view(self._add_tab('Scenario Tester'))
+        self._build_strategy_view(self._add_tab('Strategy'))
+        self._build_scenario_view(self._add_tab('Scenario'))
 
     def _add_tab(self, title):
         frame = ttk.Frame(self.nb)
@@ -415,7 +414,7 @@ class App:
         bar = ttk.Frame(parent, padding=6)
         bar.pack(fill='x')
         ttk.Label(bar, text='Strategy:').pack(side='left')
-        self.cb_view_strategy = ttk.Combobox(bar, width=24, state='readonly')
+        self.cb_view_strategy = ttk.Combobox(bar, width=26, state='readonly')
         self.cb_view_strategy.pack(side='left', padx=(0, 8))
         self.cb_view_strategy.bind('<<ComboboxSelected>>',
                                    lambda e: self._render_strategy_tables())
@@ -614,7 +613,7 @@ class App:
                   ).grid(row=1, column=1, columnspan=2, sticky='w', pady=(8, 0))
 
         ttk.Label(bar, text='Follow-up strategy').grid(row=1, column=3, sticky='w', pady=(8, 0))
-        self.cb_scen_strategy = ttk.Combobox(bar, width=16, state='readonly')
+        self.cb_scen_strategy = ttk.Combobox(bar, width=24, state='readonly')
         self.cb_scen_strategy.grid(row=1, column=4, columnspan=2, sticky='w', pady=(8, 0))
         ttk.Label(bar, text='(played per this strategy after the first move)', foreground='#64748b'
                   ).grid(row=1, column=6, sticky='w', pady=(8, 0), padx=(6, 0))
@@ -1099,20 +1098,15 @@ class App:
                 self.surrender.set(SURRENDER_LATE)
                 self.cb_sur.current(1)
             self.cb_sur.configure(values=['No surrender', 'Late surrender'])
-            notes.append('Dealer peek: BJ is settled before the player acts, so early '
-                         'surrender isn\'t available and OBO is meaningless (only the '
-                         'original bet is ever at risk anyway).')
+            notes.append('Peek: BJ settles before you act, so no early surrender; OBO is moot.')
         else:
             self.cb_obo.state(['!disabled'])
             self.cb_sur.configure(values=['No surrender', 'Late surrender', 'Early surrender'])
-            notes.append('No-peek: the hole card is revealed only after the player finishes '
-                         'acting. Late surrender loses the full bet on a dealer BJ; early '
-                         'surrender always loses only half, regardless of whether the dealer has BJ.')
+            notes.append('No-peek: late surrender loses the full bet on dealer BJ; '
+                         'early surrender always loses only half.')
         if self.csm.get():
             self.sp_pen.state(['disabled'])
-            notes.append('CSM: reshuffles every hand, no cut card, so penetration is ignored; '
-                         'card counting is therefore useless (the true count always stays near '
-                         'baseline -- selecting a * counting strategy has no effect).')
+            notes.append('CSM: reshuffles every hand, no cut card; card counting is useless.')
         else:
             self.sp_pen.state(['!disabled'])
         self.lock_note.configure(text='\n'.join(notes))
