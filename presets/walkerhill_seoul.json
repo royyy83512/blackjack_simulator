@@ -1,0 +1,18 @@
+{
+  "name": "首爾華克山莊 (Walkerhill Seoul)",
+  "description": "peek / S17 / 任兩張可加倍 / DAS / late surrender（莊家A可投降）/ 莊家BJ通殺 / 6副牌 penetration 75% / BJ 3:2 / A 最多分4手各補一張",
+  "rules": {
+    "num_decks": 6,
+    "penetration": 0.75,
+    "dealer_hits_soft_17": false,
+    "double_rule": "any2",
+    "double_after_split": true,
+    "surrender": "late",
+    "surrender_vs_ace": true,
+    "dealer_peek": true,
+    "resplit_aces": true,
+    "hit_split_aces": false,
+    "blackjack_pays": 1.5,
+    "dealer_bj_loss": "all"
+  }
+}

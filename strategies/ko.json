@@ -1,0 +1,17 @@
+{
+  "name": "ko",
+  "description": "Knock-Out（不平衡系統，直接用流水數，不用換算真數）",
+  "extends": "basic",
+  "counting": {
+    "system": "Knock-Out",
+    "balanced": false,
+    "_note": "IRC = 4 - 4×副數（6 副牌 = -20）。不平衡系統直接看流水數。",
+    "start_count": 4,
+    "start_count_per_deck": -4,
+    "tags": {"2": 1, "3": 1, "4": 1, "5": 1, "6": 1, "7": 1,
+             "8": 0, "9": 0,
+             "10": -1, "A": -1}
+  },
+  "betting": {"ramp": [[1, 1], [2, 2], [3, 4], [4, 8], [6, 12]]},
+  "insurance": {"min_count": 3}
+}

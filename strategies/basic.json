@@ -1,0 +1,123 @@
+{
+  "name": "basic",
+  "description": "基本策略（4-8 副牌 / S17 / DAS / late surrender 為基準）",
+  "_columns": "每列 10 格，依序對應莊家明牌  2  3  4  5  6  7  8  9  10  A",
+  "_tokens": "H=補 S=停 D=加倍否則補 Ds=加倍否則停 Y/P=分 Ph=有DAS才分 N=不分 Rh/Rs/Rp=投降否則補/停/分",
+  "tables": {
+    "hard": {
+      "4": "H  H  H  H  H  H  H  H  H   H",
+      "5": "H  H  H  H  H  H  H  H  H   H",
+      "6": "H  H  H  H  H  H  H  H  H   H",
+      "7": "H  H  H  H  H  H  H  H  H   H",
+      "8": "H  H  H  H  H  H  H  H  H   H",
+      "9": "H  D  D  D  D  H  H  H  H   H",
+      "10": "D  D  D  D  D  D  D  D  H   H",
+      "11": "D  D  D  D  D  D  D  D  D   H",
+      "12": "H  H  S  S  S  H  H  H  H   H",
+      "13": "S  S  S  S  S  H  H  H  H   H",
+      "14": "S   S   S   S   S   H   H   H   H   H",
+      "15": "S  S  S  S  S  H  H  H  Rh  H",
+      "16": "S  S  S  S  S  H  H  Rh Rh  Rh",
+      "17": "S  S  S  S  S  S  S  S  S   S",
+      "18": "S  S  S  S  S  S  S  S  S   S",
+      "19": "S  S  S  S  S  S  S  S  S   S",
+      "20": "S  S  S  S  S  S  S  S  S   S",
+      "21": "S  S  S  S  S  S  S  S  S   S"
+    },
+    "soft": {
+      "12": "H  H  H  H  H  H  H  H  H   H",
+      "13": "H  H  H  D  D  H  H  H  H   H",
+      "14": "H  H  H  D  D  H  H  H  H   H",
+      "15": "H  H  D  D  D  H  H  H  H   H",
+      "16": "H  H  D  D  D  H  H  H  H   H",
+      "17": "H  D  D  D  D  H  H  H  H   H",
+      "18": "S  Ds Ds Ds Ds S  S  H  H   H",
+      "19": "S  S  S  S  S  S  S  S  S   S",
+      "20": "S  S  S  S  S  S  S  S  S   S",
+      "21": "S  S  S  S  S  S  S  S  S   S"
+    },
+    "pair": {
+      "A": "Y  Y  Y  Y  Y  Y  Y  Y  Y   Y",
+      "2": "Ph Ph Y  Y  Y  Y  N  N  N   N",
+      "3": "Ph Ph Y  Y  Y  Y  N  N  N   N",
+      "4": "N  N  N  Ph Ph N  N  N  N   N",
+      "5": "N  N  N  N  N  N  N  N  N   N",
+      "6": "Ph Y  Y  Y  Y  N  N  N  N   N",
+      "7": "Y  Y  Y  Y  Y  Y  N  N  N   N",
+      "8": "Y   Y   Y   Y   Y   Y   Y   Y   P   Y",
+      "9": "Y  Y  Y  Y  Y  N  Y  Y  N   N",
+      "10": "N  N  N  N  N  N  N  N  N   N"
+    }
+  },
+  "overrides": [
+    {
+      "when": {
+        "dealer_hits_soft_17": true
+      },
+      "description": "H17：莊家軟 17 要補牌，這 6 格跟 S17 不同",
+      "cells": [
+        {
+          "table": "hard",
+          "row": "11",
+          "dealer": "A",
+          "action": "D",
+          "_note": "11 對 A 改為加倍"
+        },
+        {
+          "table": "soft",
+          "row": "18",
+          "dealer": "2",
+          "action": "Ds",
+          "_note": "A,7 對 2 改為加倍"
+        },
+        {
+          "table": "soft",
+          "row": "19",
+          "dealer": "6",
+          "action": "Ds",
+          "_note": "A,8 對 6 改為加倍"
+        },
+        {
+          "table": "hard",
+          "row": "15",
+          "dealer": "A",
+          "action": "Rh",
+          "_note": "15 對 A 改為投降"
+        },
+        {
+          "table": "hard",
+          "row": "17",
+          "dealer": "A",
+          "action": "Rs",
+          "_note": "17 對 A 改為投降"
+        },
+        {
+          "table": "pair",
+          "row": "8",
+          "dealer": "A",
+          "action": "Rp",
+          "_note": "8,8 對 A 投降優於分牌"
+        }
+      ]
+    }
+  ],
+  "early_surrender": {
+    "_note": "只在 no-peek + early surrender 生效。對子的情形已被硬點數涵蓋。",
+    "vs_ace": [
+      5,
+      6,
+      7,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17
+    ],
+    "vs_ten": [
+      14,
+      15,
+      16
+    ]
+  }
+}

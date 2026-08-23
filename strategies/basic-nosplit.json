@@ -1,0 +1,19 @@
+{
+  "name": "basic-nosplit",
+  "description": "基本策略但永不分牌（給 core/exact.py 的精確 DP 交叉驗證用）",
+  "extends": "basic",
+  "tables": {
+    "pair": {
+      "A":  "N  N  N  N  N  N  N  N  N  N",
+      "2":  "N  N  N  N  N  N  N  N  N  N",
+      "3":  "N  N  N  N  N  N  N  N  N  N",
+      "4":  "N  N  N  N  N  N  N  N  N  N",
+      "5":  "N  N  N  N  N  N  N  N  N  N",
+      "6":  "N  N  N  N  N  N  N  N  N  N",
+      "7":  "N  N  N  N  N  N  N  N  N  N",
+      "8":  "N  N  N  N  N  N  N  N  N  N",
+      "9":  "N  N  N  N  N  N  N  N  N  N",
+      "10": "N  N  N  N  N  N  N  N  N  N"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "hi-lo-i18",
+  "description": "Hi-Lo 算牌 + Illustrious 18 偏離（真數到了就改打法）",
+  "extends": "hi-lo",
+  "deviations": [
+    {"table": "hard", "row": "16", "dealer": "10", "min_count": 0,  "action": "Rs", "_note": "16 對 10：真數 >=0 改停（不能投降時）"},
+    {"table": "hard", "row": "15", "dealer": "10", "min_count": 4,  "action": "Rs", "_note": "15 對 10：真數 >=4 改停"},
+    {"table": "hard", "row": "16", "dealer": "9",  "min_count": 5,  "action": "Rs", "_note": "16 對 9：真數 >=5 改停"},
+    {"table": "pair", "row": "10", "dealer": "5",  "min_count": 5,  "action": "Y",  "_note": "10,10 對 5：真數 >=5 改分牌"},
+    {"table": "pair", "row": "10", "dealer": "6",  "min_count": 4,  "action": "Y",  "_note": "10,10 對 6：真數 >=4 改分牌"},
+    {"table": "hard", "row": "10", "dealer": "10", "min_count": 4,  "action": "D",  "_note": "10 對 10：真數 >=4 改加倍"},
+    {"table": "hard", "row": "10", "dealer": "A",  "min_count": 4,  "action": "D",  "_note": "10 對 A：真數 >=4 改加倍"},
+    {"table": "hard", "row": "11", "dealer": "A",  "min_count": 1,  "action": "D",  "_note": "11 對 A：真數 >=1 改加倍"},
+    {"table": "hard", "row": "9",  "dealer": "2",  "min_count": 1,  "action": "D",  "_note": "9 對 2：真數 >=1 改加倍"},
+    {"table": "hard", "row": "9",  "dealer": "7",  "min_count": 3,  "action": "D",  "_note": "9 對 7：真數 >=3 改加倍"},
+    {"table": "hard", "row": "12", "dealer": "2",  "min_count": 3,  "action": "S",  "_note": "12 對 2：真數 >=3 改停"},
+    {"table": "hard", "row": "12", "dealer": "3",  "min_count": 2,  "action": "S",  "_note": "12 對 3：真數 >=2 改停"},
+    {"table": "hard", "row": "12", "dealer": "4",  "max_count": 0,  "action": "H",  "_note": "12 對 4：真數 <=0 改補"},
+    {"table": "hard", "row": "12", "dealer": "5",  "max_count": -2, "action": "H",  "_note": "12 對 5：真數 <=-2 改補"},
+    {"table": "hard", "row": "12", "dealer": "6",  "max_count": -1, "action": "H",  "_note": "12 對 6：真數 <=-1 改補"},
+    {"table": "hard", "row": "13", "dealer": "2",  "max_count": -1, "action": "H",  "_note": "13 對 2：真數 <=-1 改補"},
+    {"table": "hard", "row": "13", "dealer": "3",  "max_count": -2, "action": "H",  "_note": "13 對 3：真數 <=-2 改補"}
+  ]
+}

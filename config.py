@@ -1,0 +1,6 @@
+RUNCHART = True
+RUNSTAT = False
+HANDS = 100000
+ROUNDS = 1
+BET = 1
+COUNT = False
