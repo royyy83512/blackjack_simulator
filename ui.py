@@ -350,7 +350,12 @@ class App:
         r += 1
 
     def _build_strategy(self, parent):
-        f2 = ttk.LabelFrame(parent, text=' Strategies (from strategies/*.json) ', padding=8)
+        # hint text lives in hover tooltips (_tip, reusing the same pattern
+        # as the per-strategy descriptions below) rather than always-on
+        # labels -- this tab already has three sections competing for
+        # limited vertical space on short screens, and a hover hint costs
+        # zero fixed height.
+        f2 = ttk.LabelFrame(parent, text=' Strategies (from strategies/*.json) ', padding=5)
         f2.pack(fill='x')
         self.strat_box = ttk.Frame(f2)
         self.strat_box.pack(fill='x')
@@ -360,20 +365,32 @@ class App:
         ttk.Button(bar, text='Reload strategy files', command=self._reload_strategies
                    ).pack(side='left')
         ttk.Label(bar, text='  * = card counting', foreground='#64748b').pack(side='left')
-        ttk.Separator(f2, orient='horizontal').pack(fill='x', pady=5)
-        ttk.Checkbutton(f2, text='Strategy table adapts to the rules', variable=self.adaptive).pack(anchor='w')
-        ttk.Label(f2, text='Unchecked = ignore the overrides in the strategy file,\nto see the cost of using the wrong strategy table',
-                  foreground='#64748b', justify='left').pack(anchor='w')
+        ttk.Separator(f2, orient='horizontal').pack(fill='x', pady=3)
+        cb_adaptive = ttk.Checkbutton(f2, text='Strategy table adapts to the rules', variable=self.adaptive)
+        cb_adaptive.pack(anchor='w')
+        self._tip(cb_adaptive, 'Unchecked = ignore the overrides in the strategy file, '
+                  'to see the cost of using the wrong strategy table')
 
-        f3 = ttk.LabelFrame(parent, text=' Rule Comparison ', padding=8)
-        f3.pack(fill='x', pady=(8, 0))
+        f3 = ttk.LabelFrame(parent, text=' Rule Comparison ', padding=5)
+        f3.pack(fill='x', pady=(5, 0))
         self.cb_sweep = ttk.Combobox(f3, width=26, state='readonly',
                                      values=[n for n, _ in SWEEP_LABELS])
         self.cb_sweep.current(0)
         self.cb_sweep.bind('<<ComboboxSelected>>', self._on_sweep)
         self.cb_sweep.pack(anchor='w')
-        ttk.Label(f3, text='When selected, sweeps that dimension using the same shoe\n(Common Random Numbers, making differences easier to resolve)',
-                  foreground='#64748b', justify='left').pack(anchor='w')
+        self._tip(self.cb_sweep, 'Sweeps that dimension using the same shoe '
+                  '(Common Random Numbers, making differences easier to resolve)')
+
+        f4 = ttk.LabelFrame(parent, text=' Compare Casino Presets ', padding=5)
+        f4.pack(fill='x', pady=(5, 0))
+        self.preset_compare_box = ttk.Frame(f4)
+        self.preset_compare_box.pack(fill='x')
+        self.preset_compare_vars = {}
+        self._fill_compare_presets()
+        btn_reload_presets = ttk.Button(f4, text='Reload', command=self._fill_compare_presets)
+        btn_reload_presets.pack(anchor='w', pady=(4, 0))
+        self._tip(btn_reload_presets, 'Check 2+ presets to compare them head-to-head (same shoe); '
+                  'overrides the sweep above and the Casino Rules tab')
 
     def _build_run(self, parent):
         f = ttk.Frame(parent, padding=(0, 10))
@@ -1027,6 +1044,28 @@ class App:
         elif self._preset_map:
             self.cb_preset.current(0)
 
+    def _fill_compare_presets(self):
+        """Checkbox list of presets for the 'Compare Casino Presets' box in
+        the Strategy/Compare tab -- reads the same presets/*.json as the
+        one-click preset dropdown, just presented as a multi-select."""
+        for w in self.preset_compare_box.winfo_children():
+            w.destroy()
+        try:
+            items = presets_mod.describe()
+        except Exception as e:
+            ttk.Label(self.preset_compare_box, text=f'Failed to load presets: {e}',
+                      foreground='#dc2626', wraplength=340).pack(anchor='w')
+            return
+        keep = {n: v.get() for n, v in self.preset_compare_vars.items()}
+        self.preset_compare_vars = {}
+        for name, disp, desc in items:
+            var = tk.BooleanVar(value=keep.get(name, False))
+            self.preset_compare_vars[name] = var
+            cb = ttk.Checkbutton(self.preset_compare_box, text=disp, variable=var)
+            cb.pack(anchor='w')
+            if desc:
+                self._tip(cb, desc)
+
     def _apply_preset(self):
         label = self.cb_preset.get()
         name = self._preset_map.get(label)
@@ -1179,15 +1218,36 @@ class App:
         if not strategies:
             messagebox.showerror('Input Error', 'Select at least one strategy')
             return
-        rules, notes = self._collect()
-        sweep = self.sweep.get()
-        if sweep:
-            configs = []
-            for name, fn in SWEEPS[sweep]:
-                r2, _ = normalize(fn(rules))
-                configs.append((name, r2, strategies[0]))
+        # comparing 2+ checked casino presets head-to-head takes priority
+        # over the rule sweep and the Casino Rules tab's current settings,
+        # since a preset already defines every rule field itself -- there's
+        # no single "current rules" to layer a sweep on top of.
+        compare_presets = [n for n, v in self.preset_compare_vars.items() if v.get()]
+        if len(compare_presets) >= 2:
+            preset_display = {n: d for n, d, _d in presets_mod.describe()}
+            configs, notes, rules = [], [], None
+            for name in compare_presets:
+                try:
+                    r2, notes2 = presets_mod.load(name)
+                except presets_mod.PresetError as e:
+                    messagebox.showerror('Failed to Load Preset', f'{name}: {e}')
+                    return
+                disp = preset_display.get(name, name)
+                configs.append((disp, r2, strategies[0]))
+                notes += [f'{disp}: {n}' for n in notes2]
+            rule_line = (f'Comparing presets: {", ".join(compare_presets)}'
+                        f'  (strategy: {strategies[0]})')
         else:
-            configs = [(c, rules, c) for c in strategies]
+            rules, notes = self._collect()
+            sweep = self.sweep.get()
+            if sweep:
+                configs = []
+                for name, fn in SWEEPS[sweep]:
+                    r2, _ = normalize(fn(rules))
+                    configs.append((name, r2, strategies[0]))
+            else:
+                configs = [(c, rules, c) for c in strategies]
+            rule_line = f'Rules: {rules.label()}   penetration {rules.penetration:.0%}'
 
         # a fresh seed is drawn every run unless "fixed seed" is checked --
         # otherwise the same parameters plus the same seed would produce a
@@ -1206,7 +1266,7 @@ class App:
         self.btn_save.state(['disabled'])
         self.pbar['value'] = 0
         self.status.set('Preparing...')     # don't leave the previous run's "done" on screen
-        head = [f'Rules: {rules.label()}   penetration {rules.penetration:.0%}',
+        head = [rule_line,
                 f'Simulating: {per_session:,} hands x {sessions_n:,} independent runs'
                 f' x {len(configs)} configuration(s) = {hands*len(configs):,} rounds',
                 f'Random seed: {actual_seed}'

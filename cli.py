@@ -14,6 +14,9 @@ Examples
     # rule sweep: compare 2/4/6/8 decks
     python3 cli.py --hands 20000000 --sweep decks
 
+    # compare two casinos' complete rule sets head-to-head
+    python3 cli.py --hands 20000000 --compare-presets wynn_macau walkerhill_seoul
+
     # custom rules
     python3 cli.py --hands 5000000 --decks 8 --h17 --no-das --surrender none --bj-pays 1.2
 """
@@ -133,6 +136,9 @@ def main():
     g.add_argument('--sweep', choices=sorted(SWEEPS), help='sweep one rule dimension and compare')
     g.add_argument('--preset', help='apply a casino\'s rule preset in one shot (see --list-presets); '
                    'when given, all the --decks/--h17/etc. rule flags below are ignored')
+    g.add_argument('--compare-presets', nargs='+', metavar='NAME',
+                   help='compare two or more casino presets head-to-head under the same strategy '
+                        '(Common Random Numbers); ignores --preset/--sweep/the individual rule flags')
     g.add_argument('--list-presets', action='store_true',
                    help='list every casino rule preset under presets/ and exit')
 
@@ -184,20 +190,39 @@ def main():
             raise SystemExit(f"Unknown strategy '{name}'. Available: {', '.join(available())}"
                              f" (a -fixed suffix is also accepted)")
 
-    if a.preset:
-        try:
-            rules, notes = presets_mod.load(a.preset)
-        except presets_mod.PresetError as e:
-            raise SystemExit(f"{e}\nAvailable presets: {', '.join(presets_mod.available())}"
-                             " (use --list-presets for details)")
-        print(f"  Applying preset: {a.preset} (ignoring the other --decks/--h17/etc. rule flags)")
+    rules = None
+    if a.compare_presets:
+        if len(a.compare_presets) < 2:
+            raise SystemExit("--compare-presets needs at least two preset names")
+        preset_display = {n: d for n, d, _ in presets_mod.describe()}
+        configs = []
+        for name in a.compare_presets:
+            try:
+                r2, notes2 = presets_mod.load(name)
+            except presets_mod.PresetError as e:
+                raise SystemExit(f"{e}\nAvailable presets: {', '.join(presets_mod.available())}"
+                                 " (use --list-presets for details)")
+            disp = preset_display.get(name, name)
+            configs.append((disp, r2, a.strategy[0]))
+            for n in notes2:
+                print(f"  Rule adjustment ({disp}): {n}")
+        print(f"\nComparing presets: {', '.join(a.compare_presets)}  (strategy: {a.strategy[0]}, "
+              "ignoring --preset/--sweep/individual rule flags)")
     else:
-        rules, notes = build_rules(a)
-    for n in notes:
-        print(f"  Rule adjustment: {n}")
+        if a.preset:
+            try:
+                rules, notes = presets_mod.load(a.preset)
+            except presets_mod.PresetError as e:
+                raise SystemExit(f"{e}\nAvailable presets: {', '.join(presets_mod.available())}"
+                                 " (use --list-presets for details)")
+            print(f"  Applying preset: {a.preset} (ignoring the other --decks/--h17/etc. rule flags)")
+        else:
+            rules, notes = build_rules(a)
+        for n in notes:
+            print(f"  Rule adjustment: {n}")
 
-    configs = make_configs(a, rules)
-    print(f"\nRules: {rules.label()}   penetration {rules.penetration:.0%}")
+        configs = make_configs(a, rules)
+        print(f"\nRules: {rules.label()}   penetration {rules.penetration:.0%}")
     print(f"Simulating: {a.hands:,} rounds x {len(configs)} configuration(s) = "
           f"{a.hands*len(configs):,} rounds, {a.jobs} cores, {a.sessions} session(s)")
     prec = 1.96 * 1.14 / (a.hands ** 0.5) * 100
@@ -262,7 +287,8 @@ def main():
         os.makedirs(a.out, exist_ok=True)
         path = os.path.join(a.out, 'summary.json')
         with open(path, 'w') as f:
-            json.dump({'rules': rules.to_dict(), 'hands': a.hands,
+            json.dump({'rules': rules.to_dict() if rules is not None else None,
+                       'presets': a.compare_presets, 'hands': a.hands,
                        'sessions': a.sessions, 'seed': a.seed,
                        'summaries': summaries}, f, ensure_ascii=False, indent=2)
         print("JSON: " + path)
