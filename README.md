@@ -246,6 +246,7 @@ Bundled presets:
 |---|---|---|
 | `wynn_macau` | Wynn Macau | CSM / S17 / double on any two cards / no-peek / early surrender (no surrender vs. dealer ace) / OBO / BJ 3:2 / aces split only once, one card each |
 | `walkerhill_seoul` | Walkerhill Seoul | peek / S17 / double on any two cards / DAS / late surrender (surrender vs. dealer ace allowed) / dealer BJ crushes all bets / 6 decks, 75% penetration / BJ 3:2 / aces resplit up to 4 hands, one card each |
+| `7luck_seoul` | 7 Luck Seoul | same as Walkerhill Seoul, except **H17** (dealer hits soft 17) |
 
 ```bash
 python3 cli.py --list-presets

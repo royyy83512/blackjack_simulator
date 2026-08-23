@@ -58,6 +58,14 @@ def main():
     check("no rule-conflict notes (the given rules are already consistent)",
           not any('CSM' in n or 'penetration' in n for n in notes2))
 
+    print("\n[7 Luck Seoul: identical to Walkerhill Seoul except H17]")
+    from dataclasses import replace
+    r3, notes3 = load('7luck_seoul')
+    check("H17 (dealer hits soft 17)", r3.dealer_hits_soft_17 is True)
+    check("every other field matches Walkerhill Seoul exactly",
+          r3 == replace(r2, dealer_hits_soft_17=True))
+    check("no rule-conflict notes", len(notes3) == 0)
+
     print("\n[Error handling]")
     try:
         load('a-casino-that-does-not-exist')
