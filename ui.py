@@ -1224,6 +1224,15 @@ class App:
         # no single "current rules" to layer a sweep on top of.
         compare_presets = [n for n, v in self.preset_compare_vars.items() if v.get()]
         if len(compare_presets) >= 2:
+            if len(strategies) > 1:
+                ignored = ', '.join(strategies[1:])
+                if not messagebox.askokcancel(
+                        'Multiple Strategies Selected',
+                        f'Comparing casino presets only uses one strategy at a time.\n\n'
+                        f'"{strategies[0]}" will be used; the other selected strateg'
+                        f'{"y" if len(strategies) == 2 else "ies"} ({ignored}) will be ignored.\n\n'
+                        'Continue?'):
+                    return
             preset_display = {n: d for n, d, _d in presets_mod.describe()}
             configs, notes, rules = [], [], None
             for name in compare_presets:
